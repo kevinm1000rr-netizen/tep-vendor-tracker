@@ -19,8 +19,9 @@ export default defineConfig({
     strictPort: false,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:3099',
+        target: 'https://tep-vendor-tracker-production.up.railway.app',
         changeOrigin: true,
+        secure: true,
       },
     },
   },

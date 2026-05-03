@@ -1,4 +1,8 @@
-const BASE = '/api';
+/** Default backend (Railway production). Override with `VITE_API_BASE_URL` in `.env.local` for local API, e.g. `http://127.0.0.1:3099/api`. */
+const DEFAULT_API_BASE = 'https://tep-vendor-tracker-production.up.railway.app/api';
+const BASE = String(import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE)
+  .trim()
+  .replace(/\/+$/, '');
 
 async function req(path, options = {}) {
   const r = await fetch(`${BASE}${path}`, {
