@@ -1,0 +1,8 @@
+node_modules/
+dist/
+vendor_tracker.db
+vendor_tracker.db-shm
+vendor_tracker.db-wal
+.env
+.tep-config.json
+.DS_Store

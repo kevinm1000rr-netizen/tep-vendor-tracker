@@ -1,0 +1,94 @@
+const BASE = '/api';
+
+async function req(path, options = {}) {
+  const r = await fetch(`${BASE}${path}`, {
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+    ...options,
+  });
+  if (!r.ok) {
+    let err = r.statusText;
+    try {
+      const j = await r.json();
+      err = j.error || err;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(err);
+  }
+  if (r.status === 204) return null;
+  const ct = r.headers.get('content-type');
+  if (ct && ct.includes('application/json')) return r.json();
+  return r.text();
+}
+
+export const api = {
+  vendors: (q) => req(`/vendors${q ? `?${new URLSearchParams(q)}` : ''}`),
+  vendor: (id) => req(`/vendors/${id}`),
+  patchVendor: (id, body) =>
+    req(`/vendors/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  markSent: (id, letterVersion) =>
+    req(`/vendors/${id}/mark-sent`, {
+      method: 'POST',
+      body: JSON.stringify({ letter_version_used: letterVersion }),
+    }),
+  logFollowup: (id, note) =>
+    req(`/vendors/${id}/log-followup`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    }),
+  stats: () => req('/stats'),
+  alerts: () => req('/alerts'),
+  followupLogs: (vendorId) => req(`/followup-logs/${vendorId}`),
+  generateLetter: (id) => req(`/ai/letter/${id}`, { method: 'POST' }),
+  generateFollowUp: (id) => req(`/ai/follow-up/${id}`, { method: 'POST' }),
+  generateCallScript: (id) => req(`/ai/call-script/${id}`, { method: 'POST' }),
+  monthlyReview: () => req('/ai/monthly-review', { method: 'POST' }),
+  suggestNewVendors: () => req('/ai/suggest-new-vendors', { method: 'POST' }),
+  settings: () => req('/settings'),
+  saveSettings: (body) =>
+    req('/settings', { method: 'POST', body: JSON.stringify(body) }),
+  runAgent: () => req('/agent-tasks/run', { method: 'POST' }),
+  agentTasks: (q = {}) => {
+    const qs = new URLSearchParams();
+    if (q.status) qs.set('status', q.status);
+    const s = qs.toString();
+    return req(`/agent-tasks${s ? `?${s}` : ''}`);
+  },
+  todayPriority: (limit) =>
+    req(`/agent-tasks/today-priority${limit ? `?limit=${limit}` : ''}`),
+  awaitingApproval: (limit) =>
+    req(`/agent-tasks/awaiting-approval${limit ? `?limit=${limit}` : ''}`),
+  patchAgentTask: (id, body) =>
+    req(`/agent-tasks/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  agentTaskRecommendation: (id) =>
+    req(`/agent-tasks/${id}/recommendation`, { method: 'POST' }),
+  agentRunNow: () => req('/agent/run-now', { method: 'POST' }),
+  agentRuns: (limit) => req(`/agent/runs${limit ? `?limit=${limit}` : ''}`),
+  agentPendingUpdates: () => req('/agent/pending-updates'),
+  agentApprovePendingUpdate: (id) =>
+    req(`/agent/pending-updates/${id}/approve`, { method: 'POST' }),
+  agentRejectPendingUpdate: (id) =>
+    req(`/agent/pending-updates/${id}/reject`, { method: 'POST' }),
+  agentSuggestedCompanies: (status) =>
+    req(`/agent/suggested-companies${status != null ? `?status=${encodeURIComponent(status)}` : ''}`),
+  agentApproveSuggestedCompany: (id) =>
+    req(`/agent/suggested-companies/${id}/approve`, { method: 'POST' }),
+  agentRejectSuggestedCompany: (id) =>
+    req(`/agent/suggested-companies/${id}/reject`, { method: 'POST' }),
+  agentEmailDrafts: (q = {}) => {
+    const qs = new URLSearchParams();
+    if (q.status) qs.set('status', q.status);
+    if (q.limit) qs.set('limit', String(q.limit));
+    const s = qs.toString();
+    return req(`/agent/email-drafts${s ? `?${s}` : ''}`);
+  },
+  agentReport: () => req('/agent/report'),
+  agentActivity: (limit) => req(`/agent/activity${limit ? `?limit=${limit}` : ''}`),
+  sendEmail: (body) => req('/email/send', { method: 'POST', body: JSON.stringify(body) }),
+  sendFollowupEmail: (body) => req('/email/send-followup', { method: 'POST', body: JSON.stringify(body) }),
+  testSmtp: () => req('/email/test', { method: 'POST', body: '{}' }),
+};
+
+export function downloadCsv() {
+  window.open(`${BASE}/export/csv`, '_blank');
+}
