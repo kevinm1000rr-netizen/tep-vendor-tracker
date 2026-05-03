@@ -19,7 +19,12 @@ import {
   listBlockedVendorIdsForAgent,
 } from './db.js';
 import * as ext from './externalSearch.js';
-import { qualifyProspectFromResearch, extractVendorFieldsFromSnippets, generateVendorLetter } from './ai.js';
+import {
+  qualifyProspectFromResearch,
+  extractVendorFieldsFromSnippets,
+  generateVendorLetter,
+  appendOutreachEmailSignature,
+} from './ai.js';
 
 const MAX_VENDORS_ENRICH = 16;
 const MAX_BLOCKED_EXTRA_SERPS = 24;
@@ -57,8 +62,8 @@ function vendorMissingFields(v) {
   return miss;
 }
 
-function isNameTaken(name, takenNames) {
-  if (vendorNameExistsLoose(name)) return true;
+async function isNameTaken(name, takenNames) {
+  if (await vendorNameExistsLoose(name)) return true;
   const n = normalizeNameDedupe(name);
   if (!n) return true;
   return takenNames.has(n);
@@ -96,8 +101,8 @@ function mapPlaceToApplyRows(det, missing, mapUrl) {
   return out;
 }
 
-function formatLearningHints(v) {
-  const row = getAgentLearningForCategory(v.category);
+async function formatLearningHints(v) {
+  const row = await getAgentLearningForCategory(v.category);
   if (!row) return '';
   const rate = Math.round((Number(row.response_rate) || 0) * 1000) / 10;
   const parts = [
@@ -108,11 +113,11 @@ function formatLearningHints(v) {
   return parts.filter(Boolean).join('\n');
 }
 
-function ensureResearchWeek(v) {
+async function ensureResearchWeek(v) {
   const wk = currentWeekId();
   if ((v.research_week_id || '') !== wk) {
-    updateVendor(v.id, { research_week_id: wk, research_miss_streak: 0 });
-    return getVendor(v.id);
+    await updateVendor(v.id, { research_week_id: wk, research_miss_streak: 0 });
+    return await getVendor(v.id);
   }
   return v;
 }
@@ -125,23 +130,23 @@ function vendorBlockedOnContact(v) {
 }
 
 /** Regex-only fills from organic titles/snippets when Claude is unavailable. */
-function applyHeuristicContactsFromSnippets(vendorId, snippets, summary) {
+async function applyHeuristicContactsFromSnippets(vendorId, snippets, summary) {
   let n = 0;
   for (const s of snippets) {
     const blob = `${s.title || ''} ${s.snippet || ''}`;
     const url = (s.url || '').trim() || 'https://www.google.com/';
     const em = blob.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    if (em && applyVendorFieldIfEmpty(vendorId, 'email', em[0], { source_url: url })) {
+    if (em && (await applyVendorFieldIfEmpty(vendorId, 'email', em[0], { source_url: url }))) {
       n += 1;
       summary.vendorFieldUpdates += 1;
     }
     const ph = blob.match(/\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
-    if (ph && applyVendorFieldIfEmpty(vendorId, 'phone', ph[0], { source_url: url })) {
+    if (ph && (await applyVendorFieldIfEmpty(vendorId, 'phone', ph[0], { source_url: url }))) {
       n += 1;
       summary.vendorFieldUpdates += 1;
     }
     const cm = blob.match(/\bContact:\s*([A-Za-z][A-Za-z .'-]{1,48})\b/i);
-    if (cm && applyVendorFieldIfEmpty(vendorId, 'contact_person', cm[1].trim(), { source_url: url })) {
+    if (cm && (await applyVendorFieldIfEmpty(vendorId, 'contact_person', cm[1].trim(), { source_url: url }))) {
       n += 1;
       summary.vendorFieldUpdates += 1;
     }
@@ -151,11 +156,11 @@ function applyHeuristicContactsFromSnippets(vendorId, snippets, summary) {
 
 async function maybeAutoDraftOutreach(vendorId, summary, aiKey) {
   if (!aiKey) return;
-  const v = getVendor(vendorId);
+  const v = await getVendor(vendorId);
   if (!v || v.status !== 'not_sent' || !(v.email || '').trim()) return;
-  if (vendorHasPendingOutreachDraft(vendorId)) return;
+  if (await vendorHasPendingOutreachDraft(vendorId)) return;
   try {
-    const learning = formatLearningHints(v);
+    const learning = await formatLearningHints(v);
     const text = await generateVendorLetter(v, learning);
     const t = String(text || '').trim();
     if (!t) return;
@@ -170,8 +175,8 @@ async function maybeAutoDraftOutreach(vendorId, summary, aiKey) {
         .join('\n')
         .trim();
     }
-    upsertVendorOutreachDraft(v.id, subject, body, { draft_type: 'outreach' });
-    logAgentActivity({
+    await upsertVendorOutreachDraft(v.id, subject, body, { draft_type: 'outreach' });
+    await logAgentActivity({
       activity_type: 'draft_created',
       vendor_id: v.id,
       summary: 'Outreach email draft generated (auto)',
@@ -179,13 +184,13 @@ async function maybeAutoDraftOutreach(vendorId, summary, aiKey) {
     });
     summary.outreachDraftsCreated = (summary.outreachDraftsCreated || 0) + 1;
   } catch (e) {
-    const v0 = getVendor(vendorId);
+    const v0 = await getVendor(vendorId);
     summary.errors.push(`Auto-draft ${v0?.name || vendorId}: ${e.message || e}`);
   }
 }
 
 async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
-  let v = ensureResearchWeek(getVendor(v0.id) || v0);
+  let v = await ensureResearchWeek((await getVendor(v0.id)) || v0);
   const missing = vendorMissingFields(v);
   if (!missing.length) return;
 
@@ -201,10 +206,10 @@ async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
       } else {
         const mapUrl =
           det.url || `https://www.google.com/maps/search/?api=1&query_place_id=${encodeURIComponent(found.place_id)}`;
-        v = getVendor(v.id) || v;
+        v = (await getVendor(v.id)) || v;
         const miss = vendorMissingFields(v);
         for (const row of mapPlaceToApplyRows(det, miss, mapUrl)) {
-          if (applyVendorFieldIfEmpty(v.id, row.field_name, row.proposed_value, { source_url: row.source_url })) {
+          if (await applyVendorFieldIfEmpty(v.id, row.field_name, row.proposed_value, { source_url: row.source_url })) {
             applied += 1;
             summary.vendorFieldUpdates += 1;
           }
@@ -213,7 +218,7 @@ async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
     }
   }
 
-  v = getVendor(v.id) || v;
+  v = (await getVendor(v.id)) || v;
   const miss2 = vendorMissingFields(v);
   if (sKey && miss2.length) {
     const queries = [];
@@ -237,7 +242,7 @@ async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
       const parsed = await extractVendorFieldsFromSnippets(v, snippets);
       const list = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
       const allowed = new Set(['phone', 'email', 'website', 'address', 'contact_person', 'years_in_business']);
-      v = getVendor(v.id) || v;
+      v = (await getVendor(v.id)) || v;
       const miss3 = vendorMissingFields(v);
       for (const s of list) {
         const fn = s.field;
@@ -245,19 +250,19 @@ async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
         const val = (s.value || '').trim();
         const url = (s.sourceUrl || '').trim();
         if (!val || !url) continue;
-        if (applyVendorFieldIfEmpty(v.id, fn, val, { source_url: url })) {
+        if (await applyVendorFieldIfEmpty(v.id, fn, val, { source_url: url })) {
           applied += 1;
           summary.vendorFieldUpdates += 1;
         }
       }
     }
     if (snippets.length) {
-      const extra = applyHeuristicContactsFromSnippets(v.id, snippets, summary);
+      const extra = await applyHeuristicContactsFromSnippets(v.id, snippets, summary);
       applied += extra;
     }
   }
 
-  v = getVendor(v.id) || v;
+  v = (await getVendor(v.id)) || v;
   const prevStatus = v.agent_enrichment_status || '';
   const newStreak = applied > 0 ? 0 : Math.min((v.research_miss_streak || 0) + 1, 99);
   let agentStatus = 'searching';
@@ -265,13 +270,13 @@ async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
   else if (applied > 0) agentStatus = 'found_saved';
   else if (prevStatus === 'found_saved') agentStatus = 'found_saved';
 
-  updateVendor(v.id, {
+  await updateVendor(v.id, {
     research_miss_streak: newStreak,
     agent_enrichment_status: agentStatus,
   });
 
   if (applied > 0) {
-    logAgentActivity({
+    await logAgentActivity({
       activity_type: 'enrich',
       vendor_id: v.id,
       summary: `Auto-filled ${applied} field(s)`,
@@ -283,11 +288,11 @@ async function enrichOneVendor(runId, summary, v0, gKey, sKey, aiKey) {
 
 /** Second pass: blocked vendors not in the main enrich slice — Serp “{name} San Diego contact email” only. */
 async function enrichBlockedVendorDirectedOnly(runId, summary, vendorId, sKey, aiKey) {
-  let v = ensureResearchWeek(getVendor(vendorId));
+  let v = await ensureResearchWeek(await getVendor(vendorId));
   if (!v || v.status !== 'not_sent' || !vendorBlockedOnContact(v)) return;
 
   const prevStatus = v.agent_enrichment_status || '';
-  updateVendor(v.id, { agent_enrichment_status: 'searching' });
+  await updateVendor(v.id, { agent_enrichment_status: 'searching' });
 
   let applied = 0;
   const snippets = [];
@@ -304,7 +309,7 @@ async function enrichBlockedVendorDirectedOnly(runId, summary, vendorId, sKey, a
     const parsed = await extractVendorFieldsFromSnippets(v, snippets);
     const list = Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
     const allowed = new Set(['phone', 'email', 'website', 'address', 'contact_person', 'years_in_business']);
-    v = getVendor(v.id) || v;
+    v = (await getVendor(v.id)) || v;
     const miss3 = vendorMissingFields(v);
     for (const s of list) {
       const fn = s.field;
@@ -312,30 +317,30 @@ async function enrichBlockedVendorDirectedOnly(runId, summary, vendorId, sKey, a
       const val = (s.value || '').trim();
       const url = (s.sourceUrl || '').trim();
       if (!val || !url) continue;
-      if (applyVendorFieldIfEmpty(v.id, fn, val, { source_url: url })) {
+      if (await applyVendorFieldIfEmpty(v.id, fn, val, { source_url: url })) {
         applied += 1;
         summary.vendorFieldUpdates += 1;
       }
     }
   }
   if (snippets.length) {
-    applied += applyHeuristicContactsFromSnippets(v.id, snippets, summary);
+    applied += await applyHeuristicContactsFromSnippets(v.id, snippets, summary);
   }
 
-  v = getVendor(v.id) || v;
+  v = (await getVendor(v.id)) || v;
   const newStreak = applied > 0 ? 0 : Math.min((v.research_miss_streak || 0) + 1, 99);
   let agentStatus = 'searching';
   if (newStreak >= 3) agentStatus = 'manual_lookup';
   else if (applied > 0) agentStatus = 'found_saved';
   else if (prevStatus === 'found_saved') agentStatus = 'found_saved';
 
-  updateVendor(v.id, {
+  await updateVendor(v.id, {
     research_miss_streak: newStreak,
     agent_enrichment_status: agentStatus,
   });
 
   if (applied > 0) {
-    logAgentActivity({
+    await logAgentActivity({
       activity_type: 'enrich',
       vendor_id: v.id,
       summary: `Auto-filled ${applied} field(s) (contact search)`,
@@ -346,7 +351,7 @@ async function enrichBlockedVendorDirectedOnly(runId, summary, vendorId, sKey, a
 }
 
 async function enrichVendors(runId, summary, gKey, sKey, aiKey) {
-  const vendors = listVendors();
+  const vendors = await listVendors();
   const need = vendors.filter((v) => vendorMissingFields(v).length > 0);
   need.sort((a, b) => {
     const ca = CATEGORY_PRIORITY[a.category] ?? 9;
@@ -366,7 +371,7 @@ async function enrichVendors(runId, summary, gKey, sKey, aiKey) {
 
   if (sKey) {
     let extra = 0;
-    for (const id of listBlockedVendorIdsForAgent()) {
+    for (const id of await listBlockedVendorIdsForAgent()) {
       if (enrichedIds.has(id)) continue;
       if (extra >= MAX_BLOCKED_EXTRA_SERPS) break;
       extra += 1;
@@ -380,7 +385,7 @@ async function enrichVendors(runId, summary, gKey, sKey, aiKey) {
 }
 
 async function discoverNewProspects(runId, summary, sKey, aiKey) {
-  const pendingList = listPendingNewProspects({ status: 'pending' });
+  const pendingList = await listPendingNewProspects({ status: 'pending' });
   const takenNames = new Set(pendingList.map((p) => normalizeNameDedupe(p.name)));
   let aiCalls = 0;
 
@@ -399,8 +404,8 @@ async function discoverNewProspects(runId, summary, sKey, aiKey) {
       if (!name) continue;
       const placeId = String(loc.place_id || '').trim();
       const dedupeKey = placeId ? `gplace:${placeId}` : `name:${normalizeNameDedupe(name)}`;
-      if (pendingProspectDedupeExists(dedupeKey)) continue;
-      if (isNameTaken(name, takenNames)) continue;
+      if (await pendingProspectDedupeExists(dedupeKey)) continue;
+      if (await isNameTaken(name, takenNames)) continue;
 
       const evidenceUrls = [];
       if (loc.website) evidenceUrls.push({ url: loc.website, title: `${name} — listing website` });
@@ -442,7 +447,7 @@ async function discoverNewProspects(runId, summary, sKey, aiKey) {
       const mergedEvidence = Array.isArray(out.evidenceUrls) && out.evidenceUrls.length ? out.evidenceUrls : evidenceUrls;
 
       try {
-        insertPendingNewProspect({
+        await insertPendingNewProspect({
           run_id: runId,
           name,
           category: spec.category,
@@ -456,7 +461,7 @@ async function discoverNewProspects(runId, summary, sKey, aiKey) {
           online_notes: out.onlineNotes || '',
           evidence_urls: mergedEvidence,
           tenure_evidence_summary: out.evidenceSummary || '',
-          outreach_email_draft: out.outreachEmailDraft || '',
+          outreach_email_draft: appendOutreachEmailSignature(out.outreachEmailDraft || ''),
           google_place_id: placeId,
           dedupe_key: dedupeKey,
         });
@@ -472,9 +477,13 @@ async function discoverNewProspects(runId, summary, sKey, aiKey) {
 async function ensureVendorOutreachDrafts(summary) {
   const aiKey = getApiKey();
   if (!aiKey) return;
-  const vendors = listVendors().filter(
-    (v) => v.status === 'not_sent' && (v.email || '').trim() && !vendorHasPendingOutreachDraft(v.id)
-  );
+  const allV = await listVendors();
+  const vendors = [];
+  for (const v of allV) {
+    if (v.status === 'not_sent' && (v.email || '').trim() && !(await vendorHasPendingOutreachDraft(v.id))) {
+      vendors.push(v);
+    }
+  }
   vendors.sort((a, b) => {
     const ca = CATEGORY_PRIORITY[a.category] ?? 9;
     const cb = CATEGORY_PRIORITY[b.category] ?? 9;
@@ -484,10 +493,10 @@ async function ensureVendorOutreachDrafts(summary) {
   let n = 0;
   for (const v0 of vendors) {
     if (n >= MAX_OUTREACH_DRAFTS_PER_RUN) break;
-    const v = getVendor(v0.id);
+    const v = await getVendor(v0.id);
     if (!v || !(v.email || '').trim()) continue;
     try {
-      const learning = formatLearningHints(v);
+      const learning = await formatLearningHints(v);
       const text = await generateVendorLetter(v, learning);
       const t = String(text || '').trim();
       if (!t) continue;
@@ -502,8 +511,8 @@ async function ensureVendorOutreachDrafts(summary) {
           .join('\n')
           .trim();
       }
-      upsertVendorOutreachDraft(v.id, subject, body, { draft_type: 'outreach' });
-      logAgentActivity({
+      await upsertVendorOutreachDraft(v.id, subject, body, { draft_type: 'outreach' });
+      await logAgentActivity({
         activity_type: 'draft_created',
         vendor_id: v.id,
         summary: 'Outreach email draft generated',
@@ -523,7 +532,7 @@ async function ensureVendorOutreachDrafts(summary) {
  */
 export async function runResearchAgent(opts = {}) {
   const { discovery = false } = opts;
-  const runId = insertBackgroundAgentRun();
+  const runId = await insertBackgroundAgentRun();
   const summary = {
     vendorFieldUpdates: 0,
     newProspects: 0,
@@ -556,11 +565,11 @@ export async function runResearchAgent(opts = {}) {
 
     await ensureVendorOutreachDrafts(summary);
 
-    completeBackgroundAgentRun(runId, 'completed', summary, '');
+    await completeBackgroundAgentRun(runId, 'completed', summary, '');
   } catch (e) {
     const msg = e.message || String(e);
     summary.errors.push(msg);
-    completeBackgroundAgentRun(runId, 'failed', summary, msg);
+    await completeBackgroundAgentRun(runId, 'failed', summary, msg);
   }
 }
 

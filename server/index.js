@@ -22,7 +22,6 @@ import {
   listAwaitingApproval,
   listBackgroundAgentRuns,
   listPendingVendorFieldUpdates,
-  listPendingNewProspects,
   approvePendingVendorFieldUpdate,
   rejectPendingVendorFieldUpdate,
   approvePendingNewProspect,
@@ -68,13 +67,11 @@ import {
   suggestNewVendors,
 } from './ai.js';
 import { ROOT } from './paths.js';
-import { runResearchAgent, runResearchAndOutreachAgent, startResearchAgentScheduler } from './researchAgent.js';
+import { runResearchAgent, startResearchAgentScheduler } from './researchAgent.js';
 import { sendTransactionalEmail } from './mailer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(ROOT, 'dist');
-
-initDatabase();
 
 const app = express();
 app.use(cors());
@@ -82,10 +79,10 @@ app.use(express.json({ limit: '2mb' }));
 
 const PORT = Number(process.env.PORT || 3000);
 
-function snapshotForAi() {
-  const vendors = listVendors();
-  const stats = getStats();
-  const alerts = listOverdue();
+async function snapshotForAi() {
+  const vendors = await listVendors();
+  const stats = await getStats();
+  const alerts = await listOverdue();
   const byCat = {};
   for (const row of stats.byCategory) {
     const cat = row.category;
@@ -96,8 +93,7 @@ function snapshotForAi() {
       total: vs.length,
       outreachStarted: touched,
       responsesOrApproved: wins,
-      winRate:
-        touched > 0 ? Math.round((wins / touched) * 1000) / 10 : null,
+      winRate: touched > 0 ? Math.round((wins / touched) * 1000) / 10 : null,
     };
   }
   return {
@@ -120,61 +116,102 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/vendors', (req, res) => {
-  const { category, status } = req.query;
-  res.json(listVendors({ category, status }));
-});
-
-app.get('/api/vendors/:id', (req, res) => {
-  const v = getVendor(Number(req.params.id));
-  if (!v) return res.status(404).json({ error: 'Not found' });
-  res.json(v);
-});
-
-app.patch('/api/vendors/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const v = updateVendor(id, req.body);
-  if (!v) return res.status(404).json({ error: 'Not found' });
-  res.json(v);
-});
-
-app.post('/api/vendors/:id/mark-sent', (req, res) => {
-  const id = Number(req.params.id);
-  const v = markSent(id, { letter_version_used: req.body?.letter_version_used });
-  if (!v) return res.status(404).json({ error: 'Not found' });
-  res.json(v);
-});
-
-app.post('/api/vendors/:id/log-followup', (req, res) => {
-  const id = Number(req.params.id);
-  const v = logFollowup(id, req.body?.note || '');
-  if (!v) return res.status(404).json({ error: 'Not found' });
-  res.json(v);
-});
-
-app.get('/api/stats', (_req, res) => {
-  res.json(getStats());
-});
-
-app.get('/api/alerts', (_req, res) => {
-  const today = new Date().toISOString().slice(0, 10);
-  const rows = listOverdue().map((v) => {
-    const d = v.daysUntilFollowup;
-    let level = 'ok';
-    if (d < -30) level = 'critical';
-    else if ((d >= -30 && d < 0) || (d >= 0 && d <= 7)) level = 'warn';
-    return { ...v, alertLevel: level, today };
-  });
-  res.json(rows);
-});
-
-app.get('/api/followup-logs/:vendorId', (req, res) => {
-  res.json(listFollowupLogs(Number(req.params.vendorId)));
-});
-
-app.post('/api/agent-tasks/run', (_req, res) => {
+app.get('/api/vendors', async (req, res) => {
   try {
-    const summary = runAgent();
+    const { category, status } = req.query;
+    res.json(await listVendors({ category, status }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/vendors/:id', async (req, res) => {
+  try {
+    const v = await getVendor(Number(req.params.id));
+    if (!v) return res.status(404).json({ error: 'Not found' });
+    res.json(v);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.patch('/api/vendors/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const v = await updateVendor(id, req.body);
+    if (!v) return res.status(404).json({ error: 'Not found' });
+    res.json(v);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/vendors/:id/mark-sent', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const v = await markSent(id, { letter_version_used: req.body?.letter_version_used });
+    if (!v) return res.status(404).json({ error: 'Not found' });
+    res.json(v);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/vendors/:id/log-followup', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const v = await logFollowup(id, req.body?.note || '');
+    if (!v) return res.status(404).json({ error: 'Not found' });
+    res.json(v);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/stats', async (_req, res) => {
+  try {
+    res.json(await getStats());
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/alerts', async (_req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const overdue = await listOverdue();
+    const rows = overdue.map((v) => {
+      const d = v.daysUntilFollowup;
+      let level = 'ok';
+      if (d < -30) level = 'critical';
+      else if ((d >= -30 && d < 0) || (d >= 0 && d <= 7)) level = 'warn';
+      return { ...v, alertLevel: level, today };
+    });
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/followup-logs/:vendorId', async (req, res) => {
+  try {
+    res.json(await listFollowupLogs(Number(req.params.vendorId)));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/agent-tasks/run', async (_req, res) => {
+  try {
+    const summary = await runAgent();
     res.json(summary);
   } catch (e) {
     console.error(e);
@@ -182,43 +219,63 @@ app.post('/api/agent-tasks/run', (_req, res) => {
   }
 });
 
-app.get('/api/agent-tasks', (req, res) => {
-  const { status } = req.query;
-  res.json(listAgentTasks({ status: status || undefined }));
+app.get('/api/agent-tasks', async (req, res) => {
+  try {
+    const { status } = req.query;
+    res.json(await listAgentTasks({ status: status || undefined }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
 });
 
-app.get('/api/agent-tasks/today-priority', (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 12;
-  res.json(getTodaysPriorityActions(limit));
+app.get('/api/agent-tasks/today-priority', async (req, res) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 12;
+    res.json(await getTodaysPriorityActions(limit));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
 });
 
-app.get('/api/agent-tasks/awaiting-approval', (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 20;
-  res.json(listAwaitingApproval(limit));
+app.get('/api/agent-tasks/awaiting-approval', async (req, res) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 20;
+    res.json(await listAwaitingApproval(limit));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
 });
 
-app.patch('/api/agent-tasks/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const task = getAgentTask(id);
-  if (!task) return res.status(404).json({ error: 'Not found' });
-  const body = req.body || {};
-  const { status, ai_recommendation } = body;
-  const patch = {};
-  if (status === 'pending' || status === 'done' || status === 'skipped') patch.status = status;
-  if (ai_recommendation !== undefined) patch.ai_recommendation = ai_recommendation;
-  if ('approved_by_kevin' in body) patch.approved_by_kevin = Boolean(body.approved_by_kevin);
-  const updated = updateAgentTask(id, patch);
-  res.json(updated);
+app.patch('/api/agent-tasks/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const task = await getAgentTask(id);
+    if (!task) return res.status(404).json({ error: 'Not found' });
+    const body = req.body || {};
+    const { status, ai_recommendation } = body;
+    const patch = {};
+    if (status === 'pending' || status === 'done' || status === 'skipped') patch.status = status;
+    if (ai_recommendation !== undefined) patch.ai_recommendation = ai_recommendation;
+    if ('approved_by_kevin' in body) patch.approved_by_kevin = Boolean(body.approved_by_kevin);
+    const updated = await updateAgentTask(id, patch);
+    res.json(updated);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
 });
 
 app.post('/api/agent-tasks/:id/recommendation', async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const task = getAgentTask(id);
+    const task = await getAgentTask(id);
     if (!task) return res.status(404).json({ error: 'Not found' });
-    const vendor = task.vendor_id ? getVendor(task.vendor_id) : null;
+    const vendor = task.vendor_id ? await getVendor(task.vendor_id) : null;
     const text = await generateTaskRecommendation(task, vendor);
-    const updated = updateAgentTask(id, { ai_recommendation: text });
+    const updated = await updateAgentTask(id, { ai_recommendation: text });
     res.json({ task: updated, text });
   } catch (e) {
     console.error(e);
@@ -228,7 +285,7 @@ app.post('/api/agent-tasks/:id/recommendation', async (req, res) => {
 
 app.post('/api/ai/letter/:id', async (req, res) => {
   try {
-    const v = getVendor(Number(req.params.id));
+    const v = await getVendor(Number(req.params.id));
     if (!v) return res.status(404).json({ error: 'Not found' });
     const text = await generateVendorLetter(v);
     res.json({ text });
@@ -240,7 +297,7 @@ app.post('/api/ai/letter/:id', async (req, res) => {
 
 app.post('/api/ai/follow-up/:id', async (req, res) => {
   try {
-    const v = getVendor(Number(req.params.id));
+    const v = await getVendor(Number(req.params.id));
     if (!v) return res.status(404).json({ error: 'Not found' });
     let days = 0;
     if (v.date_sent) {
@@ -258,7 +315,7 @@ app.post('/api/ai/follow-up/:id', async (req, res) => {
 
 app.post('/api/ai/call-script/:id', async (req, res) => {
   try {
-    const v = getVendor(Number(req.params.id));
+    const v = await getVendor(Number(req.params.id));
     if (!v) return res.status(404).json({ error: 'Not found' });
     const text = await generateCallScript(v);
     res.json({ text });
@@ -270,7 +327,7 @@ app.post('/api/ai/call-script/:id', async (req, res) => {
 
 app.post('/api/ai/suggest-new-vendors', async (_req, res) => {
   try {
-    const vendors = listVendors();
+    const vendors = await listVendors();
     const text = await suggestNewVendors(vendors);
     res.json({ text });
   } catch (e) {
@@ -281,7 +338,7 @@ app.post('/api/ai/suggest-new-vendors', async (_req, res) => {
 
 app.post('/api/ai/monthly-review', async (_req, res) => {
   try {
-    const snap = snapshotForAi();
+    const snap = await snapshotForAi();
     const text = await monthlyStrategicReview(snap);
     res.json({ text, snapshotMeta: { vendorCount: snap.vendors.length, at: snap.generatedAt } });
   } catch (e) {
@@ -295,13 +352,13 @@ app.post('/api/agent/run-now', (_req, res) => {
   runResearchAgent({ discovery: true }).catch((e) => console.error('[research-agent]', e));
 });
 
-app.get('/api/agent/report', (_req, res) => {
+app.get('/api/agent/report', async (_req, res) => {
   try {
     res.json({
-      summary: getAgentReportSummary(),
-      emailsReady: listEmailsReadyToSend(),
-      blocked: listBlockedCompaniesForReport(),
-      openIssues: listOpenIssuesForReport({ limit: 25 }),
+      summary: await getAgentReportSummary(),
+      emailsReady: await listEmailsReadyToSend(),
+      blocked: await listBlockedCompaniesForReport(),
+      openIssues: await listOpenIssuesForReport({ limit: 25 }),
     });
   } catch (e) {
     console.error(e);
@@ -317,9 +374,9 @@ app.post('/api/email/send', async (req, res) => {
     if (!vid || !Number.isFinite(did) || !subject || !body || !toEmail) {
       return res.status(400).json({ error: 'vendorId, draftId, subject, body, and toEmail are required' });
     }
-    const v = getVendor(vid);
+    const v = await getVendor(vid);
     if (!v) return res.status(404).json({ error: 'Vendor not found' });
-    const draft = getEmailDraft(did);
+    const draft = await getEmailDraft(did);
     if (!draft || Number(draft.vendor_id) !== vid) {
       return res.status(400).json({ error: 'Draft not found for this vendor' });
     }
@@ -331,14 +388,14 @@ app.post('/api/email/send', async (req, res) => {
       subject: subj,
       text,
     });
-    finalizeEmailDraftSent(did, vid, { subject: subj, body: text });
+    await finalizeEmailDraftSent(did, vid, { subject: subj, body: text });
     res.json({ success: true, messageId: info.messageId });
   } catch (e) {
     console.error(e);
     const did = req.body?.draftId != null ? Number(req.body.draftId) : null;
     if (did) {
       try {
-        markEmailDraftFailed(did, e.message || String(e));
+        await markEmailDraftFailed(did, e.message || String(e));
       } catch {
         /* ignore */
       }
@@ -355,10 +412,10 @@ app.post('/api/email/send-followup', async (req, res) => {
     if (!vid || !subject || !body || !toEmail) {
       return res.status(400).json({ error: 'vendorId, subject, body, and toEmail are required' });
     }
-    const v = getVendor(vid);
+    const v = await getVendor(vid);
     if (!v) return res.status(404).json({ error: 'Vendor not found' });
     if (!did) return res.status(400).json({ error: 'draftId is required for follow-up send' });
-    const draft = getEmailDraft(did);
+    const draft = await getEmailDraft(did);
     if (!draft || Number(draft.vendor_id) !== vid) {
       return res.status(404).json({ error: 'Draft not found' });
     }
@@ -370,14 +427,14 @@ app.post('/api/email/send-followup', async (req, res) => {
       subject: subj,
       text,
     });
-    finalizeFollowupEmailSent(did, vid, { subject: subj, body: text });
+    await finalizeFollowupEmailSent(did, vid, { subject: subj, body: text });
     res.json({ success: true, messageId: info.messageId });
   } catch (e) {
     console.error(e);
     const did = req.body?.draftId != null ? Number(req.body.draftId) : null;
     if (did) {
       try {
-        markEmailDraftFailed(did, e.message || String(e));
+        await markEmailDraftFailed(did, e.message || String(e));
       } catch {
         /* ignore */
       }
@@ -390,7 +447,10 @@ app.post('/api/email/test', async (_req, res) => {
   try {
     const to = getSmtpUser();
     if (!to) {
-      return res.status(400).json({ error: 'Set SMTP_USER in .env or Settings (GoDaddy mailbox login, usually kevin@triexpressplumbing.com).' });
+      return res.status(400).json({
+        error:
+          'Set SMTP_USER in .env or Settings (GoDaddy mailbox login, usually kevin@triexpressplumbing.com).',
+      });
     }
     const info = await sendTransactionalEmail({
       to,
@@ -405,94 +465,143 @@ app.post('/api/email/test', async (_req, res) => {
   }
 });
 
-app.get('/api/agent/runs', (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 25;
-  res.json(listBackgroundAgentRuns(limit));
-});
-
-app.get('/api/agent/pending-updates', (_req, res) => {
-  res.json(listPendingVendorFieldUpdates({ status: 'pending' }));
-});
-
-app.post('/api/agent/pending-updates/:id/approve', (req, res) => {
-  const id = Number(req.params.id);
-  const r = approvePendingVendorFieldUpdate(id);
-  if (r.error) return res.status(r.conflict ? 409 : 400).json(r);
-  res.json(r);
-});
-
-app.post('/api/agent/pending-updates/:id/reject', (req, res) => {
-  const id = Number(req.params.id);
-  const r = rejectPendingVendorFieldUpdate(id);
-  if (r.error) return res.status(400).json(r);
-  res.json(r);
-});
-
-app.get('/api/agent/suggested-companies', (req, res) => {
-  const st = req.query.status != null ? String(req.query.status) : 'pending';
-  const rows =
-    st === 'all' ? listSuggestedCompanies({}) : listSuggestedCompanies({ status: st });
-  res.json(rows);
-});
-
-app.post('/api/agent/suggested-companies/:id/approve', (req, res) => {
-  const id = Number(req.params.id);
-  const r = approvePendingNewProspect(id);
-  if (r.error) return res.status(400).json(r);
-  res.json(r);
-});
-
-app.post('/api/agent/suggested-companies/:id/reject', (req, res) => {
-  const id = Number(req.params.id);
-  const r = rejectPendingNewProspect(id);
-  if (r.error) return res.status(400).json(r);
-  res.json(r);
-});
-
-app.get('/api/agent/activity', (req, res) => {
-  const limit = req.query.limit ? Number(req.query.limit) : 150;
-  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
-  res.json({
-    activity: listAgentActivity(limit),
-    runs: listBackgroundAgentRuns(40),
-    vendorsThisWeek: vendorsAddedSince(weekAgo),
-    drafts: listEmailDrafts({ limit: 80 }),
-  });
-});
-
-app.get('/api/agent/email-drafts', (req, res) => {
-  const status = req.query.status ? String(req.query.status) : undefined;
-  const limit = req.query.limit ? Number(req.query.limit) : 200;
-  res.json(listEmailDrafts({ status, limit }));
-});
-
-app.get('/api/export/csv', (_req, res) => {
-  const rows = exportVendorsCsvRows();
-  const cols = [
-    'id',
-    'name',
-    'contact_person',
-    'email',
-    'phone',
-    'category',
-    'status',
-    'date_sent',
-    'next_followup_date',
-    'notes',
-    'letter_version_used',
-    'website',
-    'years_in_business',
-    'address',
-    'created_at',
-    'updated_at',
-  ];
-  const lines = [cols.join(',')];
-  for (const r of rows) {
-    lines.push(cols.map((c) => csvEscape(r[c])).join(','));
+app.get('/api/agent/runs', async (req, res) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 25;
+    res.json(await listBackgroundAgentRuns(limit));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
   }
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="vendor_tracker_export.csv"');
-  res.send(lines.join('\n'));
+});
+
+app.get('/api/agent/pending-updates', async (_req, res) => {
+  try {
+    res.json(await listPendingVendorFieldUpdates({ status: 'pending' }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/agent/pending-updates/:id/approve', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const r = await approvePendingVendorFieldUpdate(id);
+    if (r.error) return res.status(r.conflict ? 409 : 400).json(r);
+    res.json(r);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/agent/pending-updates/:id/reject', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const r = await rejectPendingVendorFieldUpdate(id);
+    if (r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/agent/suggested-companies', async (req, res) => {
+  try {
+    const st = req.query.status != null ? String(req.query.status) : 'pending';
+    const rows = st === 'all' ? await listSuggestedCompanies({}) : await listSuggestedCompanies({ status: st });
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/agent/suggested-companies/:id/approve', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const r = await approvePendingNewProspect(id);
+    if (r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/agent/suggested-companies/:id/reject', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const r = await rejectPendingNewProspect(id);
+    if (r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/agent/activity', async (req, res) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 150;
+    const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+    res.json({
+      activity: await listAgentActivity(limit),
+      runs: await listBackgroundAgentRuns(40),
+      vendorsThisWeek: await vendorsAddedSince(weekAgo),
+      drafts: await listEmailDrafts({ limit: 80 }),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/agent/email-drafts', async (req, res) => {
+  try {
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : 200;
+    res.json(await listEmailDrafts({ status, limit }));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/export/csv', async (_req, res) => {
+  try {
+    const rows = await exportVendorsCsvRows();
+    const cols = [
+      'id',
+      'name',
+      'contact_person',
+      'email',
+      'phone',
+      'category',
+      'status',
+      'date_sent',
+      'next_followup_date',
+      'notes',
+      'letter_version_used',
+      'website',
+      'years_in_business',
+      'address',
+      'created_at',
+      'updated_at',
+    ];
+    const lines = [cols.join(',')];
+    for (const r of rows) {
+      lines.push(cols.map((c) => csvEscape(r[c])).join(','));
+    }
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="vendor_tracker_export.csv"');
+    res.send(lines.join('\n'));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
 });
 
 app.get('/api/settings', (_req, res) => {
@@ -572,21 +681,34 @@ if (fs.existsSync(DIST)) {
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`TEP Vendor Tracker API http://127.0.0.1:${PORT}`);
-  if (fs.existsSync(DIST)) {
-    console.log(`Serving SPA from ${DIST}`);
-  } else {
-    console.log('Dev: Vite on port 3000 proxies /api here. Run: npm run dev');
-  }
-  if (getAgentAutoRun()) {
-    startResearchAgentScheduler();
-    console.log(
-      'Research & Outreach agent: cron daily at 06:00 server time (Agent Review); POST /api/agent/run-now to run manually.'
-    );
-  } else {
-    console.log(
-      'Research & Outreach agent: AGENT_AUTO_RUN=false — scheduled cron disabled; use POST /api/agent/run-now or Agent Review.'
-    );
-  }
+async function start() {
+  await initDatabase();
+  app.listen(PORT, () => {
+    console.log(`TEP Vendor Tracker API http://127.0.0.1:${PORT}`);
+    if (process.env.DATABASE_URL) {
+      console.log('[db] Using PostgreSQL (DATABASE_URL)');
+    } else {
+      console.log('[db] Using SQLite vendor_tracker.db');
+    }
+    if (fs.existsSync(DIST)) {
+      console.log(`Serving SPA from ${DIST}`);
+    } else {
+      console.log('Dev: Vite on port 3000 proxies /api here. Run: npm run dev');
+    }
+    if (getAgentAutoRun()) {
+      startResearchAgentScheduler();
+      console.log(
+        'Research & Outreach agent: cron daily at 06:00 server time (Agent Review); POST /api/agent/run-now to run manually.'
+      );
+    } else {
+      console.log(
+        'Research & Outreach agent: AGENT_AUTO_RUN=false — scheduled cron disabled; use POST /api/agent/run-now or Agent Review.'
+      );
+    }
+  });
+}
+
+start().catch((err) => {
+  console.error('[startup]', err);
+  process.exit(1);
 });

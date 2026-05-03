@@ -2,6 +2,22 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getApiKey, getModel } from './config.js';
 import { VENDOR_TENURE_QUALIFICATION_RULES } from './qualification.js';
 
+/** Appended to all agent / AI outreach email bodies (idempotent). */
+export const OUTREACH_EMAIL_SIGNATURE_LINE =
+  'Kevin Morris | Tri Express Plumbing | 619-843-6692 | kevin@triexpressplumbing.com | CA Lic #926629 | San Diego County';
+
+export function appendOutreachEmailSignature(body) {
+  const sig = OUTREACH_EMAIL_SIGNATURE_LINE;
+  const raw = String(body || '');
+  const t = raw.trimEnd();
+  if (!t.trim()) return '';
+  const lines = t.split(/\r?\n/);
+  let i = lines.length - 1;
+  while (i >= 0 && lines[i].trim() === '') i -= 1;
+  if (i >= 0 && lines[i].trim() === sig) return t;
+  return `${t}\n\n${sig}`;
+}
+
 const COMPANY_BLOCK = `Tri Express Plumbing — Chula Vista / San Diego County
 California Contractors License #926629 · Serving San Diego County since 2008
 
@@ -56,9 +72,12 @@ ${learningBlock || 'No extra learning data yet — rely on proof points above.'}
 
 Required proof points to weave in (truthful, do not invent other relationships): 12-year ongoing relationship with Integrity Restoration (San Diego), California Contractors License #926629, San Diego County coverage since 2008.
 
-Output the letter with today's date line, a subject line if email, salutation (use the company or "Partnership team" if no contact), body, and sign-off from Tri Express Plumbing (no fake personal name unless in notes).`;
+After the body and sign-off, end the email with this exact final line on its own (do not alter punctuation or spacing): ${OUTREACH_EMAIL_SIGNATURE_LINE}
 
-  return complete(system, user);
+Output the letter with today's date line, a subject line if email, salutation (use the company or "Partnership team" if no contact), body, brief sign-off, then that signature line.`;
+
+  const text = await complete(system, user);
+  return appendOutreachEmailSignature(text);
 }
 
 function categoryPainPoints(category) {
@@ -87,9 +106,10 @@ Date originally sent (if any): ${vendor.date_sent || 'unknown'}
 Days since first outreach (approx): ${daysSinceSent}
 Notes: ${vendor.notes || 'none'}
 
-Include subject line and email body. No attachments mentioned.`;
+Include subject line and email body. No attachments mentioned. End the email body with this exact final line on its own: ${OUTREACH_EMAIL_SIGNATURE_LINE}`;
 
-  return complete(system, user);
+  const text = await complete(system, user);
+  return appendOutreachEmailSignature(text);
 }
 
 export async function generateCallScript(vendor) {
@@ -218,7 +238,7 @@ JSON shape:
 
 qualifies: true **only** if the tenure rule below is clearly satisfied by evidence in the payload (Maps listing, URLs, snippets). If uncertain, false.
 
-outreachEmailDraft: Introductory email FROM Tri Express Plumbing TO this company (subject line + body). Use their category, service area, tenure evidence, and online notes. Sound human and local. Do not invent awards, dates, or licenses not supported by the payload. Tri Express: CA license #926629, Chula Vista / San Diego County, since 2008, water heaters / repiping / leak & slab work, strong restoration partner references.`;
+outreachEmailDraft: Introductory email FROM Tri Express Plumbing TO this company (subject line + body). Use their category, service area, tenure evidence, and online notes. Sound human and local. Do not invent awards, dates, or licenses not supported by the payload. Tri Express: CA license #926629, Chula Vista / San Diego County, since 2008, water heaters / repiping / leak & slab work, strong restoration partner references. The email must end with this exact final line: ${OUTREACH_EMAIL_SIGNATURE_LINE}`;
   const user = `## Tenure rule (strict)\n${VENDOR_TENURE_QUALIFICATION_RULES}\n\n## Candidate payload\n${JSON.stringify(payload, null, 2)}`;
   const text = await complete(system, user);
   return parseJsonLoose(text);
