@@ -200,13 +200,9 @@ export default function Tracker() {
     setImpCsv(t);
     setImpPreview(null);
     setImpMsg('');
-  };
-
-  const runImportPreview = async () => {
     setImpBusy('preview');
-    setImpMsg('');
     try {
-      const r = await api.importVendorsPreview(impCsv);
+      const r = await api.importVendorsPreview(t);
       setImpPreview(r);
     } catch (ex) {
       setImpMsg(ex.message);
@@ -215,10 +211,17 @@ export default function Tracker() {
     }
   };
 
+  const clearCsvImport = () => {
+    setImpCsv('');
+    setImpPreview(null);
+    setImpMsg('');
+    setImpBusy('');
+  };
+
   const runImportCommit = async () => {
     if (!impCsv.trim() || !impPreview?.ok || !impPreview.rowCount) return;
     const ok = window.confirm(
-      `Import ${impPreview.rowCount} row(s) into the CRM?\n\nEach will be saved as status **New**, source **manual_import** (duplicates skipped by company name).`
+      `Import all ${impPreview.rowCount} row(s) into the database?\n\nEach will be saved as status New, source manual_import (duplicate company names are skipped).`
     );
     if (!ok) return;
     setImpBusy('commit');
@@ -245,10 +248,25 @@ export default function Tracker() {
 
   return (
     <>
-      <h1 className="page-title">Vendor tracker</h1>
-      <p className="sub">
-        {vendors.length} companies · filters apply to the table · Monthly alerts tab shows due follow-ups.
-      </p>
+      <input
+        ref={csvFileRef}
+        type="file"
+        accept=".csv,text/csv"
+        style={{ display: 'none' }}
+        aria-hidden
+        onChange={onCsvFile}
+      />
+      <div className="tracker-page-head no-print">
+        <div>
+          <h1 className="page-title">Vendor tracker</h1>
+          <p className="sub" style={{ marginBottom: 0 }}>
+            {vendors.length} companies · filters apply to the table · Monthly alerts tab shows due follow-ups.
+          </p>
+        </div>
+        <button type="button" className="primary tracker-import-csv-btn" onClick={() => csvFileRef.current?.click()}>
+          Import CSV
+        </button>
+      </div>
       {err && <p style={{ color: 'var(--danger)' }}>{err}</p>}
 
       <div className="tabs">
@@ -283,41 +301,41 @@ export default function Tracker() {
         </div>
       )}
 
-      {tab === 'all' && (
+      {(impCsv.trim() || impPreview || impBusy === 'preview') && (
         <div className="panel tracker-import no-print" style={{ marginBottom: '1rem' }}>
-          <h2 style={{ margin: '0 0 0.5rem', fontSize: '1rem' }}>Import companies (CSV)</h2>
-          <p className="sub" style={{ marginTop: 0 }}>
-            Headers (case-insensitive): <strong>Company</strong> or <strong>Name</strong>, <strong>Phone</strong>,{' '}
-            <strong>Website</strong>, <strong>Service Area</strong> or <strong>Area</strong> → address,{' '}
-            <strong>Notes</strong>, <strong>Specialty</strong> or <strong>Portfolio</strong> (drives category guess + notes).
-            All imports: status <strong>New</strong>, source <strong>manual_import</strong>.
-          </p>
-          <input
-            ref={csvFileRef}
-            type="file"
-            accept=".csv,text/csv"
-            style={{ display: 'none' }}
-            onChange={onCsvFile}
-          />
-          <div className="toolbar" style={{ marginBottom: '0.5rem' }}>
-            <button type="button" onClick={() => csvFileRef.current?.click()}>
-              Choose CSV file
-            </button>
-            <button type="button" disabled={!impCsv.trim() || impBusy} onClick={runImportPreview}>
-              {impBusy === 'preview' ? 'Previewing…' : 'Preview import'}
-            </button>
-            <button
-              type="button"
-              className="primary"
-              disabled={!impCsv.trim() || !impPreview?.ok || !impPreview.rowCount || impBusy}
-              onClick={runImportCommit}
-            >
-              {impBusy === 'commit' ? 'Importing…' : 'Confirm import'}
-            </button>
+          <div className="tracker-import-panel-head">
+            <h2 style={{ margin: 0, fontSize: '1rem' }}>CSV import preview</h2>
+            <div className="toolbar" style={{ margin: 0 }}>
+              <button type="button" onClick={() => csvFileRef.current?.click()} disabled={!!impBusy}>
+                Choose different file
+              </button>
+              <button type="button" className="ghost" onClick={clearCsvImport} disabled={!!impBusy}>
+                Clear
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={!impCsv.trim() || !impPreview?.ok || !impPreview.rowCount || !!impBusy}
+                onClick={runImportCommit}
+              >
+                {impBusy === 'commit' ? 'Importing…' : 'Import all'}
+              </button>
+            </div>
           </div>
+          <p className="sub" style={{ marginTop: '0.35rem' }}>
+            Headers (case-insensitive): Company or Name, Phone, Website, Service Area or Area (→ address), Notes,
+            Specialty or Portfolio (category hint + notes). Rows are saved as status New, source manual_import.
+          </p>
           {impCsv && (
             <p className="sub" style={{ margin: '0.25rem 0' }}>
-              Loaded {impCsv.length.toLocaleString()} characters — {impPreview?.rowCount ?? '—'} data rows after preview.
+              {impBusy === 'preview' ? (
+                'Parsing CSV…'
+              ) : (
+                <>
+                  Loaded {impCsv.length.toLocaleString()} characters — {impPreview?.rowCount ?? 0} data row(s) in file
+                  {impPreview?.previewTruncated ? ` (preview shows first ${impPreview.preview?.length ?? 0} rows)` : ''}.
+                </>
+              )}
             </p>
           )}
           {impMsg && (
@@ -336,6 +354,11 @@ export default function Tracker() {
                 ))}
               </ul>
             </div>
+          )}
+          {impPreview && !impBusy && impPreview.rowCount === 0 && (
+            <p className="sub" style={{ marginTop: '0.5rem' }}>
+              No data rows to import. Add at least one non-empty row below the header.
+            </p>
           )}
           {impPreview?.preview?.length > 0 && (
             <div style={{ marginTop: '0.75rem', overflowX: 'auto' }}>
