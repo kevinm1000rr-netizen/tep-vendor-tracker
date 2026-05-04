@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { api, downloadCsv } from '../api';
 import StatusBadge from '../components/StatusBadge';
 import { categoryBadgeShort, daysSince, LETTER_VERSION_TAG } from '../lib/labels';
@@ -30,8 +30,14 @@ export default function Tracker() {
   const [aiLetter, setAiLetter] = useState('');
   const [aiFollow, setAiFollow] = useState('');
   const [aiCall, setAiCall] = useState('');
+  const [aiResearchHint, setAiResearchHint] = useState('');
   const [loadingAi, setLoadingAi] = useState('');
   const [err, setErr] = useState('');
+  const [impCsv, setImpCsv] = useState('');
+  const [impPreview, setImpPreview] = useState(null);
+  const [impBusy, setImpBusy] = useState('');
+  const [impMsg, setImpMsg] = useState('');
+  const csvFileRef = useRef(null);
 
   const load = useCallback(async () => {
     setErr('');
@@ -92,6 +98,7 @@ export default function Tracker() {
     setAiLetter('');
     setAiFollow('');
     setAiCall('');
+    setAiResearchHint('');
   };
 
   const saveEdit = async () => {
@@ -118,9 +125,18 @@ export default function Tracker() {
     if (!expanded) return;
     setLoadingAi('letter');
     setErr('');
+    setAiResearchHint('');
     try {
       const r = await api.generateLetter(expanded);
-      setAiLetter(r.text);
+      if (r.manualResearch) {
+        setAiLetter('');
+        setAiResearchHint(
+          r.reason ||
+            'Not enough verifiable company-specific facts. Add website, address, or notes; configure Google Places and SerpApi in Settings, then try again.'
+        );
+      } else {
+        setAiLetter(r.text || '');
+      }
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -132,9 +148,18 @@ export default function Tracker() {
     if (!expanded) return;
     setLoadingAi('follow');
     setErr('');
+    setAiResearchHint('');
     try {
       const r = await api.generateFollowUp(expanded);
-      setAiFollow(r.text);
+      if (r.manualResearch) {
+        setAiFollow('');
+        setAiResearchHint(
+          r.reason ||
+            'Not enough verifiable company-specific facts for a personalized follow-up. Enrich the record and try again.'
+        );
+      } else {
+        setAiFollow(r.text || '');
+      }
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -167,6 +192,55 @@ export default function Tracker() {
   const showFollowUpBtn = (v) =>
     v.status === 'sent' && v.date_sent && daysSince(v.date_sent) >= 30;
 
+  const onCsvFile = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    const t = await f.text();
+    setImpCsv(t);
+    setImpPreview(null);
+    setImpMsg('');
+  };
+
+  const runImportPreview = async () => {
+    setImpBusy('preview');
+    setImpMsg('');
+    try {
+      const r = await api.importVendorsPreview(impCsv);
+      setImpPreview(r);
+    } catch (ex) {
+      setImpMsg(ex.message);
+    } finally {
+      setImpBusy('');
+    }
+  };
+
+  const runImportCommit = async () => {
+    if (!impCsv.trim() || !impPreview?.ok || !impPreview.rowCount) return;
+    const ok = window.confirm(
+      `Import ${impPreview.rowCount} row(s) into the CRM?\n\nEach will be saved as status **New**, source **manual_import** (duplicates skipped by company name).`
+    );
+    if (!ok) return;
+    setImpBusy('commit');
+    setImpMsg('');
+    try {
+      const r = await api.importVendorsCommit(impCsv);
+      const skipped = r.skipped?.length ?? 0;
+      const errN = r.errors?.length ?? 0;
+      setImpMsg(
+        `Import finished: ${r.insertedCount} added, ${skipped} skipped (duplicate name), ${errN} row errors.` +
+          (r.truncated ? ` Only the first 2000 data rows were processed (${r.totalRowsInFile} in file).` : '')
+      );
+      setImpPreview(null);
+      setImpCsv('');
+      await load();
+    } catch (ex) {
+      setImpMsg(ex.message);
+    } finally {
+      setImpBusy('');
+    }
+  };
+
   const rows = tab === 'alerts' ? alerts : vendors;
 
   return (
@@ -197,6 +271,7 @@ export default function Tracker() {
           </select>
           <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
             <option value="">All statuses</option>
+            <option value="new">New</option>
             <option value="not_sent">Not sent</option>
             <option value="sent">Sent</option>
             <option value="responded">Responded</option>
@@ -205,6 +280,102 @@ export default function Tracker() {
           <button type="button" onClick={() => downloadCsv()}>
             Export CSV
           </button>
+        </div>
+      )}
+
+      {tab === 'all' && (
+        <div className="panel tracker-import no-print" style={{ marginBottom: '1rem' }}>
+          <h2 style={{ margin: '0 0 0.5rem', fontSize: '1rem' }}>Import companies (CSV)</h2>
+          <p className="sub" style={{ marginTop: 0 }}>
+            Headers (case-insensitive): <strong>Company</strong> or <strong>Name</strong>, <strong>Phone</strong>,{' '}
+            <strong>Website</strong>, <strong>Service Area</strong> or <strong>Area</strong> → address,{' '}
+            <strong>Notes</strong>, <strong>Specialty</strong> or <strong>Portfolio</strong> (drives category guess + notes).
+            All imports: status <strong>New</strong>, source <strong>manual_import</strong>.
+          </p>
+          <input
+            ref={csvFileRef}
+            type="file"
+            accept=".csv,text/csv"
+            style={{ display: 'none' }}
+            onChange={onCsvFile}
+          />
+          <div className="toolbar" style={{ marginBottom: '0.5rem' }}>
+            <button type="button" onClick={() => csvFileRef.current?.click()}>
+              Choose CSV file
+            </button>
+            <button type="button" disabled={!impCsv.trim() || impBusy} onClick={runImportPreview}>
+              {impBusy === 'preview' ? 'Previewing…' : 'Preview import'}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={!impCsv.trim() || !impPreview?.ok || !impPreview.rowCount || impBusy}
+              onClick={runImportCommit}
+            >
+              {impBusy === 'commit' ? 'Importing…' : 'Confirm import'}
+            </button>
+          </div>
+          {impCsv && (
+            <p className="sub" style={{ margin: '0.25rem 0' }}>
+              Loaded {impCsv.length.toLocaleString()} characters — {impPreview?.rowCount ?? '—'} data rows after preview.
+            </p>
+          )}
+          {impMsg && (
+            <p style={{ margin: '0.5rem 0', color: impMsg.startsWith('Import finished:') ? 'var(--text)' : 'var(--danger)' }}>
+              {impMsg}
+            </p>
+          )}
+          {impPreview?.errors?.length > 0 && (
+            <div style={{ marginTop: '0.5rem' }}>
+              <strong>Issues</strong>
+              <ul style={{ margin: '0.25rem 0', paddingLeft: '1.25rem' }}>
+                {impPreview.errors.map((x, i) => (
+                  <li key={i}>
+                    {typeof x === 'string' ? x : `Row ${x.row}: ${x.error}`}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {impPreview?.preview?.length > 0 && (
+            <div style={{ marginTop: '0.75rem', overflowX: 'auto' }}>
+              <strong>Preview</strong> {impPreview.previewTruncated ? `(first ${impPreview.preview.length} rows)` : ''}
+              <table className="table-compact" style={{ marginTop: '0.35rem', fontSize: '12px' }}>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Name</th>
+                    <th>Category</th>
+                    <th>Phone</th>
+                    <th>Website</th>
+                    <th>Service area</th>
+                    <th>Specialty / portfolio</th>
+                    <th>Notes (trimmed)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {impPreview.preview.map((r) => (
+                    <tr key={r.rowNumber}>
+                      <td>{r.rowNumber}</td>
+                      <td>{r.name || '—'}</td>
+                      <td>{r.category}</td>
+                      <td>{r.phone || '—'}</td>
+                      <td>{r.website || '—'}</td>
+                      <td>{r.address || '—'}</td>
+                      <td style={{ maxWidth: '160px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {(r.specialty_portfolio || '').slice(0, 80)}
+                        {(r.specialty_portfolio || '').length > 80 ? '…' : ''}
+                      </td>
+                      <td style={{ maxWidth: '280px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                        {(r.notes || '').slice(0, 120)}
+                        {(r.notes || '').length > 120 ? '…' : ''}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
@@ -344,6 +515,7 @@ export default function Tracker() {
                           <label>
                             Status
                             <select value={edit.status} onChange={(e) => setEdit({ ...edit, status: e.target.value })}>
+                              <option value="new">New</option>
                               <option value="not_sent">Not sent</option>
                               <option value="sent">Sent</option>
                               <option value="responded">Responded</option>
@@ -415,6 +587,11 @@ export default function Tracker() {
                         </div>
 
                         <h3 style={{ marginTop: '1rem' }}>AI outputs</h3>
+                        {aiResearchHint && (
+                          <p className="panel" style={{ marginTop: '0.5rem', color: 'var(--warning, #b45309)' }}>
+                            <strong>Manual research:</strong> {aiResearchHint}
+                          </p>
+                        )}
                         <div className="toolbar">
                           <button type="button" disabled={loadingAi === 'letter'} onClick={genLetter}>
                             {loadingAi === 'letter' ? '…' : 'Generate letter'}

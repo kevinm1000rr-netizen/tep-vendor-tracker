@@ -152,6 +152,16 @@ th {
   min-width: 2rem;
   text-align: center;
 }
+.badge.new {
+  background: #0f766e;
+  color: #fff;
+  border-color: #0f766e;
+}
+[data-theme='dark'] .badge.new {
+  background: #14b8a6;
+  border-color: #14b8a6;
+  color: #042f2e;
+}
 .badge.not_sent {
   background: var(--not-sent);
   color: #fff;
@@ -535,6 +545,195 @@ th {
   font-size: 12px;
   padding: 8px 16px;
   font-weight: 600;
+}
+
+/* Progress & review (MonthlyReview.jsx) */
+.review-view-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.review-view-toggle button {
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.review-view-toggle button.active {
+  background: #2563eb;
+  color: #fff;
+  border-color: #2563eb;
+}
+.review-view-toggle button:not(.active):hover {
+  background: var(--bg);
+}
+.review-daily-grid,
+.review-monthly-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 1.5rem;
+}
+.review-stat-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.review-stat-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  line-height: 1.2;
+  margin: 0.35rem 0;
+}
+.review-stat-hint {
+  font-size: 12px;
+  color: var(--muted, #64748b);
+  line-height: 1.35;
+}
+.review-section-title {
+  font-size: 1.1rem;
+  margin: 1.25rem 0 0.35rem;
+}
+.review-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.review-hour-row {
+  display: grid;
+  grid-template-columns: 64px 1fr;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.review-hour-row:last-child {
+  border-bottom: none;
+}
+.review-hour-label {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 10px 8px;
+  color: var(--muted, #64748b);
+  background: var(--bg);
+  border-right: 1px solid var(--border);
+}
+.review-hour-body {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.review-hour-empty {
+  color: var(--muted, #94a3b8);
+}
+.review-hour-list {
+  margin: 0;
+  padding-left: 1rem;
+}
+.review-hour-list li {
+  margin: 0.2rem 0;
+}
+.review-time {
+  font-weight: 600;
+  color: var(--muted, #64748b);
+  margin-right: 6px;
+}
+.review-type {
+  font-weight: 600;
+}
+.review-vendor {
+  color: #2563eb;
+}
+.review-summary {
+  color: var(--text);
+}
+.review-chart-wrap {
+  padding: 12px 12px 8px;
+  margin-bottom: 1.5rem;
+  overflow-x: auto;
+}
+.review-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  min-height: 132px;
+  padding-bottom: 4px;
+}
+.review-chart-col {
+  flex: 1 0 0;
+  min-width: 6px;
+  max-width: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.review-chart-stack {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  border-radius: 3px 3px 0 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.review-bar.discoveries {
+  background: #0d9488;
+  min-height: 0;
+}
+.review-bar.drafts {
+  background: #7c3aed;
+  min-height: 0;
+}
+.review-bar.sends {
+  background: #ea580c;
+  min-height: 0;
+}
+.review-bar.empty {
+  flex: 1;
+  background: #e2e8f0;
+  min-height: 2px;
+}
+.review-chart-x {
+  font-size: 9px;
+  color: var(--muted, #64748b);
+  margin-top: 4px;
+  white-space: nowrap;
+}
+.review-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 12px;
+  margin-top: 10px;
+  color: var(--muted, #64748b);
+}
+.review-chart-legend .swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.review-chart-legend .swatch.discoveries {
+  background: #0d9488;
+}
+.review-chart-legend .swatch.drafts {
+  background: #7c3aed;
+}
+.review-chart-legend .swatch.sends {
+  background: #ea580c;
+}
+[data-theme='dark'] .review-bar.empty {
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .link-inline {

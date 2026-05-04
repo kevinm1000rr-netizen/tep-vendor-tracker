@@ -1,14 +1,63 @@
 import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
-import { CONFIG_PATH } from './paths.js';
+import { ROOT } from './paths.js';
 
+// Project-root `.env` first (works when cwd is not the repo), then cwd `.env`. Host env wins (dotenv default).
+dotenv.config({ path: path.join(ROOT, '.env') });
 dotenv.config();
+
+function getConfigPath() {
+  const o = (process.env.TEP_CONFIG_PATH || '').trim();
+  if (o) return path.isAbsolute(o) ? o : path.join(ROOT, o);
+  return path.join(ROOT, '.tep-config.json');
+}
 
 function readFileConfig() {
   try {
-    return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    return JSON.parse(fs.readFileSync(getConfigPath(), 'utf8'));
   } catch {
     return {};
+  }
+}
+
+function writeFileConfig(data) {
+  fs.writeFileSync(getConfigPath(), JSON.stringify(data, null, 2), 'utf8');
+}
+
+function pickAnthropicFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  const v =
+    file.anthropicApiKey ?? file.ANTHROPIC_API_KEY ?? file.anthropic_api_key ?? file.ANTHROPIC_KEY ?? '';
+  return String(v).trim();
+}
+
+function pickSerpFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  const v =
+    file.serpApiKey ??
+    file.SERPAPI_API_KEY ??
+    file.serpapi_api_key ??
+    file.serpapiKey ??
+    file.SERP_API_KEY ??
+    '';
+  return String(v).trim();
+}
+
+function pickGooglePlacesFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  const v =
+    file.googlePlacesApiKey ?? file.GOOGLE_PLACES_API_KEY ?? file.google_places_api_key ?? '';
+  return String(v).trim();
+}
+
+/** @returns {boolean} Whether the resolved config file exists on disk */
+export function isTepConfigFilePresent() {
+  try {
+    fs.accessSync(getConfigPath(), fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -16,31 +65,32 @@ function readFileConfig() {
 export function getApiKey() {
   const fromEnv = (process.env.ANTHROPIC_API_KEY || '').trim();
   if (fromEnv) return fromEnv;
-  const file = readFileConfig();
-  return (file.anthropicApiKey || '').trim();
+  return pickAnthropicFromFile(readFileConfig());
 }
 
 export function saveApiKey(key) {
   const data = readFileConfig();
   data.anthropicApiKey = key;
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2), 'utf8');
+  writeFileConfig(data);
 }
 
-/** Env wins over `.tep-config.json` (reserved for future Places / SerpAPI enrichment). */
+/** Env wins over `.tep-config.json` */
 export function getGooglePlacesApiKey() {
   const fromEnv = (process.env.GOOGLE_PLACES_API_KEY || '').trim();
   if (fromEnv) return fromEnv;
-  return (readFileConfig().googlePlacesApiKey || '').trim();
+  return pickGooglePlacesFromFile(readFileConfig());
 }
 
 export function getSerpApiKey() {
-  const fromEnv = (process.env.SERPAPI_API_KEY || '').trim();
+  const fromEnv = (
+    process.env.SERPAPI_API_KEY ||
+    process.env.SERPAPI_KEY ||
+    process.env.SERP_API_KEY ||
+    ''
+  )
+    .trim();
   if (fromEnv) return fromEnv;
-  return (readFileConfig().serpApiKey || '').trim();
-}
-
-function writeFileConfig(data) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(data, null, 2), 'utf8');
+  return pickSerpFromFile(readFileConfig());
 }
 
 export function saveGooglePlacesApiKey(key) {
@@ -60,9 +110,11 @@ export function saveSerpApiKey(key) {
 }
 
 export function getModel() {
+  const file = readFileConfig();
   return (
     process.env.ANTHROPIC_MODEL?.trim() ||
-    readFileConfig().anthropicModel?.trim() ||
+    file.anthropicModel?.trim() ||
+    file.ANTHROPIC_MODEL?.trim() ||
     'claude-sonnet-4-6'
   );
 }
@@ -76,6 +128,23 @@ export function getAgentAutoRun() {
   if (!v) return true;
   if (v === 'false' || v === '0' || v === 'no' || v === 'off') return false;
   return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+}
+
+/**
+ * Live agent: repeat enrich + discovery + drafts on a timer (minutes).
+ * Set LIVE_AGENT_INTERVAL_MINUTES=30 (5–180). If unset, LIVE_AGENT_MODE=true defaults to 30.
+ * 0 or off = no interval (only daily cron when AGENT_AUTO_RUN is true).
+ */
+export function getLiveAgentIntervalMinutes() {
+  const raw = (process.env.LIVE_AGENT_INTERVAL_MINUTES ?? '').trim();
+  if (raw) {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) return Math.min(Math.max(n, 5), 180);
+    return 0;
+  }
+  const flag = (process.env.LIVE_AGENT_MODE ?? '').trim().toLowerCase();
+  if (flag === 'true' || flag === '1' || flag === 'on' || flag === 'yes') return 30;
+  return 0;
 }
 
 export function maskKey(key) {

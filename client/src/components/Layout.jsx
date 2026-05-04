@@ -41,7 +41,7 @@ export default function Layout({ children }) {
             🔍 Agent Review
           </NavLink>
           <NavLink className={({ isActive }) => (isActive ? 'active' : '')} to="/monthly">
-            📈 Monthly Review
+            📈 Review
           </NavLink>
           <NavLink className={({ isActive }) => (isActive ? 'active' : '')} to="/settings">
             ⚙️ Settings

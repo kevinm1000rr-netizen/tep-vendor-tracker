@@ -137,7 +137,10 @@ export default function Settings() {
     <>
       <h1 className="page-title">Settings</h1>
       <p className="sub">
-        Keys in <code>.env</code> or saved here to <code>.tep-config.json</code>; env wins over the file.
+        Keys in <code>.env</code> (project root) or saved here to <code>.tep-config.json</code>; environment variables
+        win over the file. You can also put <code>ANTHROPIC_API_KEY</code> / <code>SERPAPI_API_KEY</code> directly in
+        the JSON. Optional: set <code>TEP_CONFIG_PATH</code> to a custom config file path (absolute or relative to the
+        project root).
       </p>
       {err && <p style={{ color: 'var(--danger)' }}>{err}</p>}
       {msg && <p style={{ color: 'var(--ok)' }}>{msg}</p>}

@@ -2,6 +2,7 @@ import pg from 'pg';
 import { SEED_VENDORS } from './seed.js';
 import { PG_SCHEMA_DDL } from './pgSchema.js';
 import { migrateSqliteToPostgres } from './migrateSqliteToPostgres.js';
+import { ensureAgentEmailDraftHasContact } from './ai.js';
 
 const { Pool } = pg;
 
@@ -39,6 +40,19 @@ export async function initDatabase() {
   if (!conn) throw new Error('DATABASE_URL is required for PostgreSQL mode');
   pool = new Pool({ connectionString: conn, ssl: sslOpt(), max: 20 });
   await pool.query(PG_SCHEMA_DDL);
+  await pool
+    .query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS responded_at TEXT`)
+    .catch(() => {});
+  await pool
+    .query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS approved_at TEXT`)
+    .catch(() => {});
+  await pool.query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT ''`).catch(() => {});
+  await pool.query(`ALTER TABLE vendors DROP CONSTRAINT IF EXISTS vendors_status_check`).catch(() => {});
+  await pool
+    .query(
+      `ALTER TABLE vendors ADD CONSTRAINT vendors_status_check CHECK (status IN ('new','not_sent','sent','responded','approved'))`
+    )
+    .catch(() => {});
   await migrateSqliteToPostgres(pool);
   for (const cat of ['restoration', 'property_mgmt', 'hoa', 'contractor']) {
     await q(`INSERT INTO agent_learning (category) VALUES ($1) ON CONFLICT (category) DO NOTHING`, [cat]);
@@ -254,6 +268,18 @@ export async function updateVendor(id, patch) {
     if (patch[key] !== undefined) {
       sets.push(`${key} = ?`);
       vals.push(patch[key]);
+    }
+  }
+  if (patch.status !== undefined && prev && prev.status !== patch.status) {
+    if (patch.status === 'responded') {
+      sets.push(
+        `responded_at = COALESCE(NULLIF(TRIM(responded_at), ''), to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))`
+      );
+    }
+    if (patch.status === 'approved') {
+      sets.push(
+        `approved_at = COALESCE(NULLIF(TRIM(approved_at), ''), to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))`
+      );
     }
   }
   if (!sets.length) return getVendor(id);
@@ -531,6 +557,7 @@ export async function insertPendingNewProspect(row) {
   for (const u of evidenceUrls.slice(0, 8)) {
     if (u?.url) reasonParts.push(`${u.title || 'Source'}: ${u.url}`);
   }
+  const outreachEnsured = ensureAgentEmailDraftHasContact(row.outreach_email_draft || '');
   const { rows } = await q(
     `INSERT INTO suggested_companies (
       name, category, phone, email, website, address, city, years_in_business, source_url,
@@ -548,7 +575,7 @@ export async function insertPendingNewProspect(row) {
       firstUrl,
       reasonParts.join('\n\n') || '',
       row.confidence_score != null ? Number(row.confidence_score) : 0.85,
-      row.outreach_email_draft || '',
+      outreachEnsured,
       row.dedupe_key,
       row.prospect_subtype || '',
       row.contact_person || '',
@@ -556,7 +583,7 @@ export async function insertPendingNewProspect(row) {
     ]
   );
   const sid = rows[0].id;
-  const draftText = (row.outreach_email_draft || '').trim();
+  const draftText = outreachEnsured.trim();
   if (draftText) {
     const { subject, body } = splitEmailSubjectBody(draftText);
     await q(
@@ -652,13 +679,13 @@ function collectContactGaps(v) {
 export async function listBlockedVendorIdsForAgent() {
   const rows = await qAll(
     `SELECT id FROM vendors
-     WHERE status = 'not_sent'
-     AND (
-       TRIM(COALESCE(email,'')) = ''
-       OR TRIM(COALESCE(contact_person,'')) = ''
-       OR TRIM(COALESCE(phone,'')) = ''
-     )
-     ORDER BY id ASC`
+     WHERE status IN ('not_sent','new')
+       AND (
+         TRIM(COALESCE(email,'')) = ''
+         OR TRIM(COALESCE(contact_person,'')) = ''
+         OR TRIM(COALESCE(phone,'')) = ''
+       )
+       ORDER BY id ASC`
   );
   return rows.map((r) => r.id);
 }
@@ -666,13 +693,13 @@ export async function listBlockedVendorIdsForAgent() {
 export async function listBlockedCompaniesForReport() {
   const rows = await qAll(
     `SELECT * FROM vendors
-     WHERE status = 'not_sent'
-     AND (
-       TRIM(COALESCE(email,'')) = ''
-       OR TRIM(COALESCE(contact_person,'')) = ''
-       OR TRIM(COALESCE(phone,'')) = ''
-     )
-     ORDER BY created_at ASC`
+     WHERE status IN ('not_sent','new')
+       AND (
+         TRIM(COALESCE(email,'')) = ''
+         OR TRIM(COALESCE(contact_person,'')) = ''
+         OR TRIM(COALESCE(phone,'')) = ''
+       )
+       ORDER BY created_at ASC`
   );
   return rows.map((v) => {
     const missingLabels = collectContactGaps(v);
@@ -690,7 +717,7 @@ export async function listOpenIssuesForReport({ limit = 25 } = {}) {
   const issues = [];
   const stuck = await qAll(
     `SELECT id, name, category, agent_enrichment_status, research_miss_streak FROM vendors
-     WHERE status = 'not_sent' AND COALESCE(research_miss_streak,0) >= 3
+     WHERE status IN ('not_sent','new') AND COALESCE(research_miss_streak,0) >= 3
      LIMIT 10`
   );
   for (const v of stuck) {
@@ -746,7 +773,7 @@ export async function getAgentReportSummary() {
   const vendorApprovals = (await qGet(`SELECT COUNT(*)::int AS n FROM vendors WHERE status = 'approved'`))?.n;
   const companiesBlocked = (
     await qGet(
-      `SELECT COUNT(*)::int AS n FROM vendors WHERE status = 'not_sent' AND (
+      `SELECT COUNT(*)::int AS n FROM vendors WHERE status IN ('not_sent','new') AND (
         TRIM(COALESCE(email,'')) = ''
         OR TRIM(COALESCE(contact_person,'')) = ''
         OR TRIM(COALESCE(phone,'')) = ''
@@ -774,7 +801,178 @@ export async function getAgentReportSummary() {
   };
 }
 
+function addCalendarDayYmdPg(dayYmd, deltaDays) {
+  const d = new Date(`${dayYmd}T12:00:00`);
+  d.setDate(d.getDate() + deltaDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+/**
+ * @param {{ date?: string }} params
+ */
+export async function getReviewDashboard(params = {}) {
+  const day =
+    typeof params.date === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(params.date.trim())
+      ? params.date.trim()
+      : new Date().toISOString().slice(0, 10);
+  const monthKey = day.slice(0, 7);
+  const dayStart = `${day} 00:00:00`;
+  const dayEnd = `${addCalendarDayYmdPg(day, 1)} 00:00:00`;
+
+  const cnt = async (sql, ...args) => Number((await qGet(sql, args))?.n || 0);
+
+  const newCompaniesAgentToday = await cnt(
+    `SELECT COUNT(*)::int AS n FROM agent_activity
+     WHERE activity_type = 'discovery_register' AND created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const newVendorRowsToday = await cnt(
+    `SELECT COUNT(*)::int AS n FROM vendors WHERE created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const draftsCreatedToday = await cnt(
+    `SELECT COUNT(*)::int AS n FROM agent_activity
+     WHERE activity_type = 'draft_created' AND created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const emailsSentToday = await cnt(
+    `SELECT COUNT(*)::int AS n FROM agent_activity
+     WHERE activity_type IN ('email_sent','followup_email_sent')
+       AND created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const respondedToday = await cnt(
+    `SELECT COUNT(*)::int AS n FROM vendors
+     WHERE COALESCE(TRIM(responded_at), '') <> ''
+       AND (responded_at LIKE ? OR responded_at LIKE ?)`,
+    `${day} %`,
+    `${day}T%`
+  );
+  const partnershipsThisMonth = await cnt(
+    `SELECT COUNT(*)::int AS n FROM vendors
+     WHERE status = 'approved'
+       AND COALESCE(TRIM(approved_at), '') <> ''
+       AND substring(replace(approved_at, 'T', ' '), 1, 7) = ?`,
+    monthKey
+  );
+
+  const monthlyContacted = await cnt(
+    `SELECT COUNT(*)::int AS n FROM vendors
+     WHERE date_sent IS NOT NULL AND TRIM(date_sent) <> ''
+       AND substring(trim(date_sent), 1, 7) = ?`,
+    monthKey
+  );
+  const monthlyRespondedAmongContacted = await cnt(
+    `SELECT COUNT(*)::int AS n FROM vendors
+     WHERE date_sent IS NOT NULL AND TRIM(date_sent) <> ''
+       AND substring(trim(date_sent), 1, 7) = ?
+       AND status IN ('responded','approved')`,
+    monthKey
+  );
+  const monthlyPartnershipsWithStamp = await cnt(
+    `SELECT COUNT(*)::int AS n FROM vendors
+     WHERE status = 'approved'
+       AND COALESCE(TRIM(approved_at), '') <> ''
+       AND substring(replace(approved_at, 'T', ' '), 1, 7) = ?`,
+    monthKey
+  );
+  const responseRatePct =
+    monthlyContacted > 0
+      ? Math.round((monthlyRespondedAmongContacted / monthlyContacted) * 1000) / 10
+      : null;
+
+  const EST_PER_PARTNER_MONTHLY_USD = 3500;
+  const estimatedRevenuePotentialMonthly = monthlyPartnershipsWithStamp * EST_PER_PARTNER_MONTHLY_USD;
+
+  const chartStart = `${addCalendarDayYmdPg(day, -29)} 00:00:00`;
+  const chartEnd = dayEnd;
+  const activityBuckets = await qAll(
+    `SELECT substring(replace(created_at, 'T', ' '), 1, 10) AS d,
+            activity_type AS t,
+            COUNT(*)::int AS c
+     FROM agent_activity
+     WHERE created_at >= ? AND created_at < ?
+       AND activity_type IN ('discovery_register','draft_created','email_sent','followup_email_sent')
+     GROUP BY d, t`,
+    [chartStart, chartEnd]
+  );
+  const byDay = {};
+  for (let i = -29; i <= 0; i += 1) {
+    const d = addCalendarDayYmdPg(day, i);
+    byDay[d] = { date: d, discoveries: 0, drafts: 0, sends: 0 };
+  }
+  for (const row of activityBuckets) {
+    const b = byDay[row.d];
+    if (!b) continue;
+    if (row.t === 'discovery_register') b.discoveries += row.c;
+    if (row.t === 'draft_created') b.drafts += row.c;
+    if (row.t === 'email_sent' || row.t === 'followup_email_sent') b.sends += row.c;
+  }
+  const chart30 = Object.keys(byDay)
+    .sort()
+    .map((k) => byDay[k]);
+
+  const timelineRows = await qAll(
+    `SELECT a.activity_type, a.summary, a.created_at, v.name AS vendor_name
+     FROM agent_activity a
+     LEFT JOIN vendors v ON v.id = a.vendor_id
+     WHERE a.created_at >= ? AND a.created_at < ?
+     ORDER BY a.created_at ASC`,
+    [dayStart, dayEnd]
+  );
+
+  const timelineByHour = Array.from({ length: 24 }, (_, hour) => ({
+    hour,
+    label: `${String(hour).padStart(2, '0')}:00`,
+    activities: [],
+  }));
+  for (const r of timelineRows) {
+    const raw = String(r.created_at || '').replace('T', ' ');
+    const hh = parseInt(raw.slice(11, 13), 10);
+    const hour = Number.isFinite(hh) ? hh : 0;
+    const slot = timelineByHour[Math.min(23, Math.max(0, hour))];
+    slot.activities.push({
+      created_at: r.created_at,
+      activity_type: r.activity_type,
+      summary: r.summary,
+      vendor_name: r.vendor_name || null,
+    });
+  }
+
+  return {
+    day,
+    monthKey,
+    daily: {
+      newCompaniesAgentToday,
+      newVendorRowsToday,
+      draftsCreatedToday,
+      emailsSentToday,
+      respondedToday,
+      partnershipsThisMonth,
+    },
+    monthly: {
+      contactedThisMonth: monthlyContacted,
+      respondedAmongContactedThisMonth: monthlyRespondedAmongContacted,
+      responseRatePct,
+      partnershipsEstablishedThisMonth: monthlyPartnershipsWithStamp,
+      estimatedRevenuePotentialMonthly,
+      estimatedRevenueNote:
+        'Rough pipeline: new approvals this month × $3,500/mo assumed partner job mix (adjust to your book of business).',
+    },
+    chart30,
+    timelineByHour,
+  };
+}
+
 export async function upsertVendorOutreachDraft(vendorId, subject, body, { draft_type = 'outreach' } = {}) {
+  const bodySafe = ensureAgentEmailDraftHasContact(body || '');
   await q(
     `DELETE FROM email_drafts WHERE vendor_id = ? AND suggested_company_id IS NULL AND draft_type = ? AND status IN ('draft','pending_kevin')`,
     [vendorId, draft_type]
@@ -782,7 +980,7 @@ export async function upsertVendorOutreachDraft(vendorId, subject, body, { draft
   const { rows } = await q(
     `INSERT INTO email_drafts (vendor_id, suggested_company_id, subject, body, status, draft_type, created_at)
      VALUES (?, NULL, ?, ?, 'draft', ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')) RETURNING id`,
-    [vendorId, subject || '', body || '', draft_type]
+    [vendorId, subject || '', bodySafe, draft_type]
   );
   return getEmailDraft(rows[0].id);
 }
@@ -904,16 +1102,77 @@ export async function insertVendor({
   website = '',
   years_in_business = '',
   address = '',
+  status = 'not_sent',
+  source = '',
 }) {
+  const st = ['new', 'not_sent', 'sent', 'responded', 'approved'].includes(status) ? status : 'not_sent';
   const { rows } = await q(
     `INSERT INTO vendors (
       name, contact_person, email, phone, category, status,
       date_sent, next_followup_date, notes, letter_version_used,
-      website, years_in_business, address, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, 'not_sent', NULL, NULL, ?, '', ?, ?, ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')) RETURNING id`,
-    [name, contact_person || '', email || '', phone || '', category, notes || '', website || '', years_in_business || '', address || '']
+      website, years_in_business, address, source, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, '', ?, ?, ?, ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')) RETURNING id`,
+    [
+      name,
+      contact_person || '',
+      email || '',
+      phone || '',
+      category,
+      st,
+      notes || '',
+      website || '',
+      years_in_business || '',
+      address || '',
+      source || '',
+    ]
   );
   return getVendor(rows[0].id);
+}
+
+/**
+ * @param {Array<{ name: string, phone?: string, website?: string, address?: string, category: string, notes: string }>} rows
+ */
+export async function importVendorsFromMappedRows(rows) {
+  const inserted = [];
+  const skipped = [];
+  const errors = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i] || {};
+    const name = String(r.name || '').trim();
+    if (!name) {
+      errors.push({ row: i + 1, error: 'Missing company name' });
+      continue;
+    }
+    if (await vendorNameExistsLoose(name)) {
+      skipped.push({ row: i + 1, name, reason: 'Similar name already in CRM' });
+      continue;
+    }
+    try {
+      const v = await insertVendor({
+        name,
+        contact_person: '',
+        email: '',
+        phone: String(r.phone || '').trim(),
+        category: r.category || 'contractor',
+        notes: String(r.notes || '').trim(),
+        website: String(r.website || '').trim(),
+        years_in_business: '',
+        address: String(r.address || '').trim(),
+        status: 'new',
+        source: 'manual_import',
+      });
+      inserted.push(v);
+    } catch (e) {
+      errors.push({ row: i + 1, name, error: String(e.message || e) });
+    }
+  }
+  await logAgentActivity({
+    activity_type: 'csv_import',
+    vendor_id: null,
+    summary: `CSV import: ${inserted.length} added, ${skipped.length} skipped`,
+    detail: { inserted: inserted.length, skipped: skipped.length, errorCount: errors.length },
+  });
+  return { insertedCount: inserted.length, skipped, errors, insertedIds: inserted.map((v) => v.id) };
 }
 
 const PENDING_VENDOR_FIELDS = new Set([

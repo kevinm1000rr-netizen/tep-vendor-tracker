@@ -29,6 +29,7 @@ import {
   listSuggestedCompanies,
   listEmailDrafts,
   getAgentReportSummary,
+  getReviewDashboard,
   listEmailsReadyToSend,
   listBlockedCompaniesForReport,
   listOpenIssuesForReport,
@@ -38,6 +39,7 @@ import {
   markEmailDraftFailed,
   listAgentActivity,
   vendorsAddedSince,
+  importVendorsFromMappedRows,
 } from './db.js';
 import {
   getApiKey,
@@ -49,6 +51,7 @@ import {
   saveGooglePlacesApiKey,
   saveSerpApiKey,
   getAgentAutoRun,
+  getLiveAgentIntervalMinutes,
   isSmtpConfigured,
   getSmtpHost,
   getSmtpPort,
@@ -57,6 +60,7 @@ import {
   saveSmtpSettings,
   getSmtpPassMasked,
   OUTBOUND_FROM_EMAIL,
+  isTepConfigFilePresent,
 } from './config.js';
 import {
   generateVendorLetter,
@@ -65,9 +69,12 @@ import {
   monthlyStrategicReview,
   generateTaskRecommendation,
   suggestNewVendors,
+  isManualResearchLetterOutput,
+  getManualResearchLetterReason,
 } from './ai.js';
+import { buildOutreachResearchBrief } from './outreachResearch.js';
 import { ROOT } from './paths.js';
-import { runResearchAgent, startResearchAgentScheduler } from './researchAgent.js';
+import { runResearchAgent, startResearchAgentScheduler, startLiveAgentLoop } from './researchAgent.js';
 import { sendTransactionalEmail } from './mailer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -87,7 +94,7 @@ async function snapshotForAi() {
   for (const row of stats.byCategory) {
     const cat = row.category;
     const vs = vendors.filter((v) => v.category === cat);
-    const touched = vs.filter((v) => v.status !== 'not_sent').length;
+    const touched = vs.filter((v) => v.status !== 'not_sent' && v.status !== 'new').length;
     const wins = vs.filter((v) => v.status === 'responded' || v.status === 'approved').length;
     byCat[cat] = {
       total: vs.length,
@@ -149,6 +156,75 @@ app.patch('/api/vendors/:id', async (req, res) => {
   }
 });
 
+app.post('/api/vendors/import-preview', async (req, res) => {
+  try {
+    const csvText = String(req.body?.csv ?? '');
+    const matrix = parseCsvRows(csvText);
+    const { headers, fieldByCol, dataRows, errors: headerErrors } = analyzeCsvTable(matrix);
+    const errs = [...headerErrors];
+    const preview = [];
+    for (let i = 0; i < dataRows.length; i += 1) {
+      const cells = dataRows[i];
+      const rec = rowToImportRecord(cells, fieldByCol);
+      if (!rec.name) errs.push({ row: i + 2, error: 'Missing company name (mapped column empty)' });
+      preview.push({
+        rowNumber: i + 2,
+        name: rec.name,
+        phone: rec.phone,
+        website: rec.website,
+        address: rec.address,
+        category: rec.category,
+        specialty_portfolio: rec.specialty_portfolio,
+        notes: rec.notes,
+      });
+    }
+    res.json({
+      ok: headerErrors.length === 0,
+      headers,
+      rowCount: preview.length,
+      preview: preview.slice(0, 150),
+      previewTruncated: preview.length > 150,
+      errors: errs,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Preview failed' });
+  }
+});
+
+app.post('/api/vendors/import-commit', async (req, res) => {
+  try {
+    const csvText = String(req.body?.csv ?? '');
+    const matrix = parseCsvRows(csvText);
+    const { fieldByCol, dataRows, errors: headerErrors } = analyzeCsvTable(matrix);
+    if (headerErrors.length) {
+      return res.status(400).json({ error: 'Fix CSV headers before importing.', details: headerErrors });
+    }
+    const max = 2000;
+    const slice = dataRows.slice(0, max);
+    const normalized = slice
+      .map((cells) => {
+        const rec = rowToImportRecord(cells, fieldByCol);
+        const cat = String(rec.category || '').trim();
+        const category = ['restoration', 'property_mgmt', 'hoa', 'contractor'].includes(cat) ? cat : 'contractor';
+        return {
+          name: rec.name.trim(),
+          phone: rec.phone,
+          website: rec.website,
+          address: rec.address,
+          category,
+          notes: rec.notes,
+        };
+      })
+      .filter((r) => r.name);
+    const result = await importVendorsFromMappedRows(normalized);
+    res.json({ ...result, truncated: dataRows.length > max, totalRowsInFile: dataRows.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Import failed' });
+  }
+});
+
 app.post('/api/vendors/:id/mark-sent', async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -176,6 +252,16 @@ app.post('/api/vendors/:id/log-followup', async (req, res) => {
 app.get('/api/stats', async (_req, res) => {
   try {
     res.json(await getStats());
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/review-dashboard', async (req, res) => {
+  try {
+    const date = typeof req.query.date === 'string' ? req.query.date.trim() : '';
+    res.json(await getReviewDashboard({ date }));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Failed' });
@@ -287,8 +373,20 @@ app.post('/api/ai/letter/:id', async (req, res) => {
   try {
     const v = await getVendor(Number(req.params.id));
     if (!v) return res.status(404).json({ error: 'Not found' });
-    const text = await generateVendorLetter(v);
-    res.json({ text });
+    const brief = await buildOutreachResearchBrief(v, {
+      googlePlacesKey: getGooglePlacesApiKey(),
+      serpKey: getSerpApiKey(),
+    });
+    const text = await generateVendorLetter(v, '', brief);
+    const raw = String(text || '').trim();
+    if (isManualResearchLetterOutput(raw)) {
+      return res.json({
+        manualResearch: true,
+        reason: getManualResearchLetterReason(raw),
+        text: '',
+      });
+    }
+    res.json({ manualResearch: false, text: raw });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'AI error' });
@@ -305,8 +403,20 @@ app.post('/api/ai/follow-up/:id', async (req, res) => {
       const b = new Date();
       days = Math.max(0, Math.round((b - a) / 86400000));
     }
-    const text = await generateFollowUpEmail(v, days);
-    res.json({ text });
+    const brief = await buildOutreachResearchBrief(v, {
+      googlePlacesKey: getGooglePlacesApiKey(),
+      serpKey: getSerpApiKey(),
+    });
+    const text = await generateFollowUpEmail(v, days, brief);
+    const raw = String(text || '').trim();
+    if (isManualResearchLetterOutput(raw)) {
+      return res.json({
+        manualResearch: true,
+        reason: getManualResearchLetterReason(raw),
+        text: '',
+      });
+    }
+    res.json({ manualResearch: false, text: raw });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'AI error' });
@@ -616,6 +726,7 @@ app.get('/api/settings', (_req, res) => {
     maskedGooglePlacesKey: maskKey(g),
     hasSerpApiKey: Boolean(s),
     maskedSerpApiKey: maskKey(s),
+    tepConfigFilePresent: isTepConfigFilePresent(),
     smtpConfigured: isSmtpConfigured(),
     smtpHost: getSmtpHost(),
     smtpPort: getSmtpPort(),
@@ -662,6 +773,7 @@ app.post('/api/settings', (req, res) => {
     maskedGooglePlacesKey: maskKey(g),
     hasSerpApiKey: Boolean(s),
     maskedSerpApiKey: maskKey(s),
+    tepConfigFilePresent: isTepConfigFilePresent(),
     smtpConfigured: isSmtpConfigured(),
     smtpHost: getSmtpHost(),
     smtpPort: getSmtpPort(),
@@ -698,11 +810,18 @@ async function start() {
     if (getAgentAutoRun()) {
       startResearchAgentScheduler();
       console.log(
-        'Research & Outreach agent: cron daily at 06:00 server time (Agent Review); POST /api/agent/run-now to run manually.'
+        'Research & Outreach agent: cron daily at 06:00 server time; POST /api/agent/run-now to run manually.'
       );
     } else {
       console.log(
-        'Research & Outreach agent: AGENT_AUTO_RUN=false — scheduled cron disabled; use POST /api/agent/run-now or Agent Review.'
+        'Research & Outreach agent: AGENT_AUTO_RUN=false — daily cron disabled; use POST /api/agent/run-now or Agent Review.'
+      );
+    }
+    startLiveAgentLoop();
+    const liveMins = getLiveAgentIntervalMinutes();
+    if (liveMins > 0) {
+      console.log(
+        `Live discovery agent: every ${liveMins} min (LIVE_AGENT_INTERVAL_MINUTES or LIVE_AGENT_MODE=true). Auto-adds 10+ year San Diego vendors + partnership drafts.`
       );
     }
   });

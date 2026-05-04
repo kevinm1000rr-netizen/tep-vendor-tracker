@@ -30,6 +30,10 @@ export const api = {
   vendor: (id) => req(`/vendors/${id}`),
   patchVendor: (id, body) =>
     req(`/vendors/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  importVendorsPreview: (csv) =>
+    req('/vendors/import-preview', { method: 'POST', body: JSON.stringify({ csv }) }),
+  importVendorsCommit: (csv) =>
+    req('/vendors/import-commit', { method: 'POST', body: JSON.stringify({ csv }) }),
   markSent: (id, letterVersion) =>
     req(`/vendors/${id}/mark-sent`, {
       method: 'POST',
@@ -41,6 +45,10 @@ export const api = {
       body: JSON.stringify({ note }),
     }),
   stats: () => req('/stats'),
+  reviewDashboard: (date) => {
+    const q = date ? `?date=${encodeURIComponent(date)}` : '';
+    return req(`/review-dashboard${q}`);
+  },
   alerts: () => req('/alerts'),
   followupLogs: (vendorId) => req(`/followup-logs/${vendorId}`),
   generateLetter: (id) => req(`/ai/letter/${id}`, { method: 'POST' }),

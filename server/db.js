@@ -67,6 +67,7 @@ export const listBlockedVendorIdsForAgent = (...a) => callDb('listBlockedVendorI
 export const listBlockedCompaniesForReport = (...a) => callDb('listBlockedCompaniesForReport', ...a);
 export const listOpenIssuesForReport = (...a) => callDb('listOpenIssuesForReport', ...a);
 export const getAgentReportSummary = (...a) => callDb('getAgentReportSummary', ...a);
+export const getReviewDashboard = (...a) => callDb('getReviewDashboard', ...a);
 export const upsertVendorOutreachDraft = (...a) => callDb('upsertVendorOutreachDraft', ...a);
 export const finalizeEmailDraftSent = (...a) => callDb('finalizeEmailDraftSent', ...a);
 export const finalizeFollowupEmailSent = (...a) => callDb('finalizeFollowupEmailSent', ...a);
@@ -77,6 +78,7 @@ export const setPendingNewProspectStatus = (...a) => callDb('setPendingNewProspe
 export const vendorNameExistsLoose = (...a) => callDb('vendorNameExistsLoose', ...a);
 export const pendingProspectDedupeExists = (...a) => callDb('pendingProspectDedupeExists', ...a);
 export const insertVendor = (...a) => callDb('insertVendor', ...a);
+export const importVendorsFromMappedRows = (...a) => callDb('importVendorsFromMappedRows', ...a);
 export const applyVendorFieldIfEmpty = (...a) => callDb('applyVendorFieldIfEmpty', ...a);
 export const approvePendingVendorFieldUpdate = (...a) => callDb('approvePendingVendorFieldUpdate', ...a);
 export const rejectPendingVendorFieldUpdate = (...a) => callDb('rejectPendingVendorFieldUpdate', ...a);

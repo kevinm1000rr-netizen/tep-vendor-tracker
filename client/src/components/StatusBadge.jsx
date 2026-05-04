@@ -1,4 +1,5 @@
 const CODES = {
+  new: 'NW',
   not_sent: 'NS',
   sent: 'ST',
   responded: 'RS',
@@ -6,6 +7,7 @@ const CODES = {
 };
 
 const LABELS = {
+  new: 'New',
   not_sent: 'Not sent',
   sent: 'Sent',
   responded: 'Responded',

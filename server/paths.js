@@ -7,5 +7,3 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
 
 export const DB_PATH = path.join(ROOT, 'vendor_tracker.db');
-
-export const CONFIG_PATH = path.join(ROOT, '.tep-config.json');

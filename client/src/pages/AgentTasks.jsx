@@ -6,7 +6,9 @@ function formatSummary(s) {
   if (!s || typeof s !== 'object') return '';
   const parts = [];
   if (s.vendorFieldUpdates != null) parts.push(`${s.vendorFieldUpdates} field updates`);
-  if (s.newProspects != null) parts.push(`${s.newProspects} prospects`);
+  if (s.vendorsAutoRegistered != null && s.vendorsAutoRegistered > 0) {
+    parts.push(`${s.vendorsAutoRegistered} vendors added`);
+  } else if (s.newProspects != null) parts.push(`${s.newProspects} prospects`);
   if (s.outreachDraftsCreated != null) parts.push(`${s.outreachDraftsCreated} drafts`);
   if (s.skippedNoSearchKeys) parts.push('no search keys');
   if (s.discoverySkippedNoSerpApi) parts.push('no SerpAPI');

@@ -2,9 +2,19 @@ import Anthropic from '@anthropic-ai/sdk';
 import { getApiKey, getModel } from './config.js';
 import { VENDOR_TENURE_QUALIFICATION_RULES } from './qualification.js';
 
+/** Canonical Tri Express contact lines for every agent email draft. */
+export const OUTREACH_FULL_NAME = 'Kevin Morris';
+export const OUTREACH_PHONE = '619-843-6692';
+export const OUTREACH_EMAIL_ADDR = 'kevin@triexpressplumbing.com';
+
 /** Appended to all agent / AI outreach email bodies (idempotent). */
-export const OUTREACH_EMAIL_SIGNATURE_LINE =
-  'Kevin Morris | Tri Express Plumbing | 619-843-6692 | kevin@triexpressplumbing.com | CA Lic #926629 | San Diego County';
+export const OUTREACH_EMAIL_SIGNATURE_LINE = `${OUTREACH_FULL_NAME} | Tri Express Plumbing | ${OUTREACH_PHONE} | ${OUTREACH_EMAIL_ADDR} | CA Lic #926629 | San Diego County`;
+
+/** B2B outreach only — never promise 24/7, after-hours, or late-night on-call in letters or AI drafts. */
+export const OUTREACH_SCHEDULING_PRIORITY_LINE =
+  'Same-day and next-day scheduling for priority partners.';
+export const OUTREACH_SCHEDULING_HOURS_LINE =
+  'Business hours Monday through Friday 7am to 6pm, Saturday by appointment.';
 
 export function appendOutreachEmailSignature(body) {
   const sig = OUTREACH_EMAIL_SIGNATURE_LINE;
@@ -18,8 +28,19 @@ export function appendOutreachEmailSignature(body) {
   return `${t}\n\n${sig}`;
 }
 
+/** Signature line + fallback so full name, business number, and email appear in stored/UI drafts. */
+export function ensureAgentEmailDraftHasContact(body) {
+  const t = appendOutreachEmailSignature(body);
+  if (!t.trim()) return t;
+  const low = t.toLowerCase();
+  const hasName = t.includes(OUTREACH_FULL_NAME);
+  if (t.includes(OUTREACH_PHONE) && low.includes(OUTREACH_EMAIL_ADDR.toLowerCase()) && hasName) return t;
+  return `${t.trimEnd()}\n\n${OUTREACH_FULL_NAME} | ${OUTREACH_PHONE} | ${OUTREACH_EMAIL_ADDR}`;
+}
+
 const COMPANY_BLOCK = `Tri Express Plumbing — Chula Vista / San Diego County
 California Contractors License #926629 · Serving San Diego County since 2008
+Primary contact: ${OUTREACH_FULL_NAME} · Business line ${OUTREACH_PHONE} · ${OUTREACH_EMAIL_ADDR}
 
 Core trades you promote to partners:
 - Water heater repair & replacement
@@ -27,7 +48,12 @@ Core trades you promote to partners:
 - Leak detection
 - Slab leak repair
 
-Proof point: 12-year ongoing relationship with Integrity Restoration (San Diego) — reliable emergency plumbing on restoration jobs.`;
+Proof point: 12-year ongoing relationship with Integrity Restoration (San Diego) — reliable plumbing coordination on restoration jobs (scheduled within the partnership hours below).
+
+Partnership scheduling (outreach must match this; never contradict):
+• ${OUTREACH_SCHEDULING_PRIORITY_LINE}
+• ${OUTREACH_SCHEDULING_HOURS_LINE}
+Do not promise 24/7 availability, after-hours or late-night emergency callouts, Sunday service, or on-call coverage outside these hours.`;
 
 /** Prompt style tuned for Claude Sonnet (default model claude-sonnet-4-6). */
 const MODEL_PROMPT_PREFIX = `You are writing for Claude Sonnet: be specific, San Diego–local where it matters, and avoid generic corporate filler. `;
@@ -51,70 +77,136 @@ async function complete(system, user) {
   return block?.text?.trim() || '';
 }
 
-export async function generateVendorLetter(vendor, learningBlock = '') {
+/** First line exactly; optional following lines with reason — no generic letter. */
+export const MANUAL_RESEARCH_LETTER_PREFIX = 'MANUAL_RESEARCH_REQUIRED';
+
+export function isManualResearchLetterOutput(text) {
+  return String(text || '').trim().startsWith(MANUAL_RESEARCH_LETTER_PREFIX);
+}
+
+export function getManualResearchLetterReason(text) {
+  const lines = String(text || '').trim().split(/\r?\n/);
+  const rest = lines.slice(1).join('\n').trim();
+  const m = rest.match(/^reason:\s*(.+)$/im);
+  if (m) return m[1].trim();
+  return rest || 'Not enough verifiable, company-specific facts in the research package to write a personalized letter.';
+}
+
+export async function generateVendorLetter(vendor, learningBlock = '', researchBrief = '') {
   const categoryLabel = categoryHuman(vendor.category);
-  const pain = categoryPainPoints(vendor.category);
-  const system = `${MODEL_PROMPT_PREFIX}You write warm, professional B2B outreach letters for a plumbing company partnering with ${categoryLabel} firms in San Diego. Letters should sound human and local — not generic mail-merge. No clichés like "I hope this finds you well." One page or less. Include clear ask: preferred vendor list / emergency line / single point of contact.`;
+  const angle = categoryOutreachAngle(vendor);
+  const system = `${MODEL_PROMPT_PREFIX}You write **fully personalized** B2B partnership letters (Tri Express Plumbing → one recipient company). Each letter must read as written for **that** company only — no boilerplate that could apply to any firm.
+
+Rules:
+- Open by using the **recipient company name** naturally in the first or second sentence.
+- Include **at least two** concrete, citable specifics drawn **only** from the research package and CRM facts (e.g. geography/service area, portfolio scale if evidenced, tenure, a paraphrased public review theme about water/plumbing/building maintenance — never quote reviews you cannot tie to a URL in the package).
+- Tie Tri Express services to **their** operational pain (not a generic list).
+- **Never** use vague phrases like "your industry" without naming what they do, or "companies like yours" without a specific hook.
+- If the research package does **not** contain enough verifiable specifics to meet the bar above, **do not** write a partnership letter. Output **only**:
+  ${MANUAL_RESEARCH_LETTER_PREFIX}
+  Reason: <one short sentence>
+
+Category voice (weave naturally; do not label as bullets in the letter): ${angle}
+
+Mandatory Tri Express facts (must appear in body or closing, truthfully): **Tri Express Plumbing** has served **San Diego County since 2008**; **California Contractors License #926629** (or "CA Lic #926629"); 12-year ongoing relationship with **Integrity Restoration** (San Diego) as one reference — do not invent other client names.
+
+**Scheduling (strict):** Any sentence about availability must reflect only: **${OUTREACH_SCHEDULING_PRIORITY_LINE}** and **${OUTREACH_SCHEDULING_HOURS_LINE}**. Do **not** mention 24/7, after-hours, overnight, late-night, all-hours hotlines, or emergency service outside those hours.
+
+Signature: sign as **${OUTREACH_FULL_NAME}**; include **${OUTREACH_PHONE}** and **${OUTREACH_EMAIL_ADDR}** in the body; final line must be **exactly**: ${OUTREACH_EMAIL_SIGNATURE_LINE}
+
+No clichés ("I hope this finds you well"). One page or less. Clear ask: preferred vendor / dedicated partnership contact / single point of contact during the hours above.`;
+  const rb =
+    (researchBrief && String(researchBrief).trim()) ||
+    '(No external research run — use only CRM fields; if too thin, use MANUAL_RESEARCH_REQUIRED.)';
   const user = `${COMPANY_BLOCK}
 
-Write an introductory partnership letter TO this organization:
+## Research package (primary source for personalization — do not invent facts not supported here)
+${rb}
 
-Company: ${vendor.name}
+---
+
+Write an introductory partnership letter **to ${vendor.name}**.
+
+CRM fields:
 Category: ${categoryLabel}
 Contact (if any): ${vendor.contact_person || 'General partnership'}
 Phone on file: ${vendor.phone || 'n/a'}
+Website: ${vendor.website || 'n/a'}
+Address: ${vendor.address || 'n/a'}
 Internal notes: ${vendor.notes || 'none'}
 
-Category-specific value angle (use naturally, don't list as bullets in the letter): ${pain}
+Learning / performance hints (secondary):
+${learningBlock || 'None.'}
 
-Learning / performance hints for this category (use if helpful; do not fabricate metrics):
-${learningBlock || 'No extra learning data yet — rely on proof points above.'}
-
-Required proof points to weave in (truthful, do not invent other relationships): 12-year ongoing relationship with Integrity Restoration (San Diego), California Contractors License #926629, San Diego County coverage since 2008.
-
-After the body and sign-off, end the email with this exact final line on its own (do not alter punctuation or spacing): ${OUTREACH_EMAIL_SIGNATURE_LINE}
-
-Output the letter with today's date line, a subject line if email, salutation (use the company or "Partnership team" if no contact), body, brief sign-off, then that signature line.`;
+Output: today's date line, \`Subject: ...\` line, salutation, body, brief sign-off, then the exact signature line ${OUTREACH_EMAIL_SIGNATURE_LINE} on its own final line.`;
 
   const text = await complete(system, user);
-  return appendOutreachEmailSignature(text);
+  const raw = String(text || '').trim();
+  if (isManualResearchLetterOutput(raw)) return raw;
+  return ensureAgentEmailDraftHasContact(raw);
 }
 
-function categoryPainPoints(category) {
-  const m = {
-    restoration:
-      'Emergency response time on water/fire jobs; reliable sub for mitigation partners; fast dispatch on restoration timelines.',
-    property_mgmt:
-      'Quick turnaround on tenant turnover work; predictable scheduling; volume-friendly pricing for recurring properties.',
-    hoa:
-      'Reliability and documentation; insurance-friendly repairs; clear communication with boards and managers.',
-    contractor:
-      'Rough-in scheduling and ADU timelines; coordination on remodel phases; fewer callbacks on plumbing scope.',
-  };
-  return m[category] || m.restoration;
+/** Category-specific partnership angles (user-requested hooks). */
+function categoryOutreachAngle(vendor) {
+  const cat = vendor.category;
+  const name = String(vendor.name || '').toLowerCase();
+  const hotelish = /hotel|resort|inn|suites|lodg|hospitality|marriott|hilton|hyatt|ihg|wyndham/.test(name);
+  if (cat === 'property_mgmt') {
+    return `**Property managers:** prompt coordination on **tenant-reported** leaks and fixtures during scheduled windows; **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}** — no after-hours or 24/7 promises; turnover-unit hot water and fixture work at volume.`;
+  }
+  if (cat === 'hoa') {
+    return `**HOAs / community managers:** **common-area** maintenance (pools, clubhouses, irrigation), reserve-friendly documentation, and **code compliance** on mechanical/plumbing for boards; **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}**`;
+  }
+  if (cat === 'restoration') {
+    return `**Restoration partners:** urgent **water-damage** plumbing coordinated with dry-out/mitigation timelines; **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}** — do not imply midnight or all-night dispatch.`;
+  }
+  if (cat === 'contractor' && hotelish) {
+    return `**Hotels / hospitality:** engineering-friendly **scheduled** visits and phased shutoffs for **minimal guest disruption**; domestic hot water and public restrooms — **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}** (no 24/7 or overnight-on-call claims).`;
+  }
+  if (cat === 'contractor') {
+    return `**Facilities / commercial / institutional:** align with what the research shows (schools, clinics, senior living, offices) — recurring drain/water-heater/kitchen mechanical work and reliable CM coordination; **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}**.`;
+  }
+  return `Emphasize licensed, local San Diego County coverage and predictable partnership communication; **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}**.`;
 }
 
-export async function generateFollowUpEmail(vendor, daysSinceSent) {
+export async function generateFollowUpEmail(vendor, daysSinceSent, researchBrief = '') {
   const categoryLabel = categoryHuman(vendor.category);
-  const system = `${MODEL_PROMPT_PREFIX}You write short, respectful follow-up emails for an established San Diego plumbing contractor. Assume they may be busy; offer value (fast response, licensed, restoration experience). Keep under 200 words unless critical detail needed.`;
+  const angle = categoryOutreachAngle(vendor);
+  const system = `${MODEL_PROMPT_PREFIX}You write **personalized** short follow-up emails to **one** company (${vendor.name}). Under ~220 words. No generic template.
+
+If the research package lacks enough verifiable specifics for a tailored follow-up, output only:
+${MANUAL_RESEARCH_LETTER_PREFIX}
+Reason: <short>
+
+Otherwise: reference something specific from the research; tie to ${angle} Tri Express (since 2008, CA Lic #926629). Availability wording only: **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}** — never 24/7, after-hours, or late-night promises. Include ${OUTREACH_FULL_NAME}, ${OUTREACH_PHONE}, ${OUTREACH_EMAIL_ADDR} in the body; final line exactly ${OUTREACH_EMAIL_SIGNATURE_LINE}.`;
+  const rb =
+    (researchBrief && String(researchBrief).trim()) ||
+    '(No external research — CRM only; if too thin, use MANUAL_RESEARCH_REQUIRED.)';
   const user = `${COMPANY_BLOCK}
 
-Draft a follow-up email for:
+## Research package
+${rb}
+
+Follow-up context:
 Company: ${vendor.name} (${categoryLabel})
 Status: ${vendor.status}
 Date originally sent (if any): ${vendor.date_sent || 'unknown'}
 Days since first outreach (approx): ${daysSinceSent}
 Notes: ${vendor.notes || 'none'}
 
-Include subject line and email body. No attachments mentioned. End the email body with this exact final line on its own: ${OUTREACH_EMAIL_SIGNATURE_LINE}`;
+Subject + body; no attachments.`;
 
   const text = await complete(system, user);
-  return appendOutreachEmailSignature(text);
+  const raw = String(text || '').trim();
+  if (isManualResearchLetterOutput(raw)) return raw;
+  return ensureAgentEmailDraftHasContact(raw);
 }
 
 export async function generateCallScript(vendor) {
   const categoryLabel = categoryHuman(vendor.category);
-  const system = `${MODEL_PROMPT_PREFIX}You create concise phone call scripts with bullet talking points for a plumbing business owner calling vendor partners. Conversational, confident, not salesy. Include: opener, 3–5 talking points tied to THEIR business type, handling objections briefly, and a clear close (schedule intro / send license & W-9 / add to vendor list).`;
+  const system = `${MODEL_PROMPT_PREFIX}You create concise phone call scripts with bullet talking points for a plumbing business owner calling vendor partners. Conversational, confident, not salesy. Include: opener, 3–5 talking points tied to THEIR business type, handling objections briefly, and a clear close (schedule intro / send license & W-9 / add to vendor list).
+
+**Availability on calls:** If you mention when Tri Express can work or take calls, use only: **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}**. Never promise 24/7, after-hours, overnight, or late-night emergency availability.`;
   const user = `${COMPANY_BLOCK}
 
 Create a call script for Tri Express calling:
@@ -129,7 +221,9 @@ Format: sections with short bullets (Opener, Value for them, Tri Express proof p
 }
 
 export async function monthlyStrategicReview(snapshot) {
-  const system = `${MODEL_PROMPT_PREFIX}You are a practical business development coach for a busy plumbing company owner (Kevin) in San Diego. Your job is a monthly vendor-partnership review: prioritize ruthlessly, name specific companies to call this week, explain win rates, and give a short action checklist. Tone: direct, friendly, no corporate jargon. Use markdown headings (##) and bullet lists. Quantify when data exists; otherwise say what's unknown.`;
+  const system = `${MODEL_PROMPT_PREFIX}You are a practical business development coach for a busy plumbing company owner (Kevin) in San Diego. Your job is a monthly vendor-partnership review: prioritize ruthlessly, name specific companies to call this week, explain win rates, and give a short action checklist. Tone: direct, friendly, no corporate jargon. Use markdown headings (##) and bullet lists. Quantify when data exists; otherwise say what's unknown.
+
+When suggesting **outreach or positioning** for partners, availability is only: **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}** — never recommend 24/7, after-hours, or late-night on-call promises.`;
   const user = `Here is the current vendor tracker snapshot (JSON). Analyze and produce a monthly strategic report.
 
 ${JSON.stringify(snapshot, null, 2)}
@@ -159,7 +253,9 @@ export async function suggestNewVendors(existingVendors) {
 }
 
 export async function generateTaskRecommendation(taskRow, vendorRow) {
-  const system = `${MODEL_PROMPT_PREFIX}You are Kevin's vendor-outreach assistant. Give one tight recommendation: what to do next, in what order, and why it matters this week. Max 120 words. No markdown headings — short paragraphs or bullets.`;
+  const system = `${MODEL_PROMPT_PREFIX}You are Kevin's vendor-outreach assistant. Give one tight recommendation: what to do next, in what order, and why it matters this week. Max 120 words. No markdown headings — short paragraphs or bullets.
+
+If your advice mentions how Tri Express shows up for partners, availability is only: **${OUTREACH_SCHEDULING_PRIORITY_LINE}** **${OUTREACH_SCHEDULING_HOURS_LINE}** — never suggest 24/7 or after-hours promises.`;
   const payload = {
     taskTitle: taskRow.title,
     taskDescription: taskRow.description,
@@ -238,10 +334,59 @@ JSON shape:
 
 qualifies: true **only** if the tenure rule below is clearly satisfied by evidence in the payload (Maps listing, URLs, snippets). If uncertain, false.
 
-outreachEmailDraft: Introductory email FROM Tri Express Plumbing TO this company (subject line + body). Use their category, service area, tenure evidence, and online notes. Sound human and local. Do not invent awards, dates, or licenses not supported by the payload. Tri Express: CA license #926629, Chula Vista / San Diego County, since 2008, water heaters / repiping / leak & slab work, strong restoration partner references. The email must end with this exact final line: ${OUTREACH_EMAIL_SIGNATURE_LINE}`;
+outreachEmailDraft: Introductory email FROM Tri Express Plumbing TO this company (subject line + body), written on behalf of **${OUTREACH_FULL_NAME}**. **Personalize:** cite at least **two** concrete specifics from the payload only (maps fields, snippets, company name/address). No generic template. If the payload does **not** support two verifiable specifics, set **outreachEmailDraft** to the empty string \`""\` and append to **onlineNotes** (new line): \`Outreach draft: needs manual research (insufficient public specifics).\` Tri Express: CA license #926629, San Diego County since 2008; Integrity Restoration reference is allowed. **Scheduling in the draft:** use only **${OUTREACH_SCHEDULING_PRIORITY_LINE}** and **${OUTREACH_SCHEDULING_HOURS_LINE}** — never 24/7, after-hours, late-night, overnight, or Sunday coverage. The draft (when non-empty) must include **${OUTREACH_FULL_NAME}**, **${OUTREACH_PHONE}**, and **${OUTREACH_EMAIL_ADDR}** in the body and end with this exact final line: ${OUTREACH_EMAIL_SIGNATURE_LINE}`;
   const user = `## Tenure rule (strict)\n${VENDOR_TENURE_QUALIFICATION_RULES}\n\n## Candidate payload\n${JSON.stringify(payload, null, 2)}`;
   const text = await complete(system, user);
-  return parseJsonLoose(text);
+  const out = parseJsonLoose(text);
+  if (out && typeof out.outreachEmailDraft === 'string' && out.outreachEmailDraft.trim()) {
+    out.outreachEmailDraft = ensureAgentEmailDraftHasContact(out.outreachEmailDraft);
+  }
+  return out;
+}
+
+/**
+ * Discovery triage for auto-registry: San Diego County, established operators, recurring-plumbing fit.
+ */
+export async function qualifyDiscoveryProspect(payload) {
+  const system = `${MODEL_PROMPT_PREFIX}You triage **commercial plumbing partnership** targets for Tri Express (San Diego County) from SerpApi Maps + organic snippets. Output **only valid JSON** (no markdown, no code fences).
+
+JSON shape:
+{"qualifies":boolean,"evidenceSummary":string,"evidenceUrls":[{"url":string,"title":string}],"yearsInBusiness":string,"contactPerson":string,"email":string,"phone":string,"website":string,"address":string,"onlineNotes":string,"outreachEmailDraft":string}
+
+**Pre-screened by code (trust these booleans):** mapsListing.reviews ≥ 10, listing has a website URL, San Diego County search context.
+
+**qualifies — true only if ALL are satisfied:**
+
+1) **Geography:** Clearly serves or is located in **San Diego County** (or immediate border work into SD County). Reject if clearly LA/OC/Inland Empire-only with no SD tie.
+
+2) **Business age — 5+ years operating:** Defensible evidence the operating company (not a random new DBA) has been active **≥ ~5 years** — e.g. "since 2020" or **earlier** founding year, "over 5 years", "6+ years", BBB founded ≤2020, news/About copy with long tenure, or **organic snippets** that state longevity. **Reviews count alone is not enough** for business age.
+
+3) **Online presence — ≥ ~3 years:** The business has a **meaningful public web footprint for ≥ ~3 years** — e.g. snippet shows **copyright / “site ©” year ≤ 2023**, blog or press from **2023 or earlier**, "since 2022" on the **web** side, or multiple dated pages; **reject** if every signal suggests the **brand or site launched within the last ~36 months** with no contrary evidence.
+
+4) **Vertical fit (use payload.category, prospect_subtype, search_focus, companyName, maps type):**
+   - **property_mgmt / 50+ units:** Evidence the manager handles **large residential portfolios** (many units, multifamily, "portfolio", "communities", class-A apartments) — not a single-family handyman.
+   - **property_mgmt / commercial_re_manager:** **Commercial** building or asset property management (office, retail, medical office, industrial) — recurring maintenance plumbing.
+   - **hoa:** **HOA / community association management** firms (not restaurants, not unrelated retail).
+   - **restoration / franchise_***:** Only **ServPro, ServiceMaster Restore, or Paul Davis** branded locations (name or official branding matches); reject independent mom-pop shops for these rows.
+   - **contractor / hotel|school_district|healthcare|senior_living:** Operating **hotel/resort**, **K–12 district or large school facilities**, **hospital/medical campus**, or **senior living / skilled nursing** with ongoing facilities — **priority** where **recurring drain/water heater/restroom/kitchen** work is plausible.
+
+5) **Recurring plumbing priority:** In **onlineNotes**, first line must be exactly one of: \`Recurring plumbing fit: high\`, \`Recurring plumbing fit: medium\`, or \`Recurring plumbing fit: low\` — then one sentence why (e.g. turnover units, guest towers, cafeterias, clinical sinks).
+
+**false** if any requirement fails, wrong vertical, residential-only PM when subtype expects 50+ scale without evidence, spam, or insufficient evidence for (2)–(4).
+
+**Tenure evidence:** Cite sources in evidenceSummary. yearsInBusiness: short human string.
+
+Fill **phone**, **website**, **address** from mapsListing when present. **Email** only if a snippet clearly shows one (do not guess).
+
+outreachEmailDraft: introductory email (subject + body) from **${OUTREACH_FULL_NAME}** at Tri Express. **Personalize** with at least **two** specifics from the payload (maps, snippets, category, search_focus). If you cannot, set **outreachEmailDraft** to \`""\` and append to **onlineNotes**: \`Outreach draft: needs manual research (insufficient public specifics).\` **Scheduling:** only **${OUTREACH_SCHEDULING_PRIORITY_LINE}** and **${OUTREACH_SCHEDULING_HOURS_LINE}** — no 24/7, after-hours, late-night, overnight, or Sunday promises. When non-empty, include **${OUTREACH_FULL_NAME}**, **${OUTREACH_PHONE}**, **${OUTREACH_EMAIL_ADDR}** in the body and end with: ${OUTREACH_EMAIL_SIGNATURE_LINE}`;
+  const focus = payload.search_focus ? `\nSearch focus:\n${payload.search_focus}\n` : '';
+  const user = `Discovery row — category=${payload.category}${payload.prospect_subtype ? ` subtype=${payload.prospect_subtype}` : ''}\n${focus}\nPayload JSON:\n${JSON.stringify(payload, null, 2)}`;
+  const text = await complete(system, user);
+  const out = parseJsonLoose(text);
+  if (out && typeof out.outreachEmailDraft === 'string' && out.outreachEmailDraft.trim()) {
+    out.outreachEmailDraft = ensureAgentEmailDraftHasContact(out.outreachEmailDraft);
+  }
+  return out;
 }
 
 /**

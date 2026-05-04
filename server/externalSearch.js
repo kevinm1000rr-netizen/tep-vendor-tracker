@@ -2,9 +2,21 @@
  * Google Places (Find Place + Place Details) and SerpApi helpers for the background research agent.
  */
 
+const LOG = '[discovery:serp]';
+
+function safeSerpLogUrl(url) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set('api_key', '(redacted)');
+    return u.toString();
+  } catch {
+    return url.slice(0, 80);
+  }
+}
+
 async function fetchJson(url) {
   const r = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!r.ok) throw new Error(`HTTP ${r.status} for ${url.slice(0, 80)}…`);
+  if (!r.ok) throw new Error(`HTTP ${r.status} for ${safeSerpLogUrl(url)}`);
   return r.json();
 }
 
@@ -34,32 +46,89 @@ export async function googlePlaceDetails(placeId, apiKey) {
   return j.result || null;
 }
 
+/** San Diego County centroid — SerpApi Maps `ll` origin (see SerpApi google_maps docs). */
+const SD_COUNTY_LL = '@32.78,-116.96,10z';
+
+/**
+ * Normalize SerpApi Google Maps hit shapes into one list.
+ * @param {Record<string, unknown>} j
+ */
+function collectMapsLocalBlocks(j) {
+  const blocks = [];
+  const push = (arr) => {
+    if (!arr) return;
+    if (!Array.isArray(arr)) {
+      console.warn(`${LOG} unexpected non-array maps block:`, typeof arr);
+      return;
+    }
+    blocks.push(...arr);
+  };
+  push(j.local_results);
+  push(j.place_results);
+  push(j.places);
+  return blocks;
+}
+
 /**
  * SerpApi Google Maps local results (San Diego–oriented queries).
+ * Requires `type=search` for the google_maps engine (SerpApi docs).
  * @returns {Array<{ title: string, place_id?: string, address?: string, phone?: string, website?: string, reviews?: number, type?: string }>}
  */
 export async function serpGoogleMapsLocal(query, apiKey) {
-  if (!apiKey) return [];
+  if (!apiKey) {
+    console.warn(`${LOG} skip Maps: empty API key`);
+    return [];
+  }
   const params = new URLSearchParams({
     engine: 'google_maps',
+    type: 'search',
     q: query,
     api_key: apiKey,
     hl: 'en',
     gl: 'us',
+    ll: SD_COUNTY_LL,
   });
-  const j = await fetchJson(`https://serpapi.com/search.json?${params}`);
-  const locals = j.local_results || j.place_results || [];
-  if (!Array.isArray(locals)) return [];
-  return locals.map((x) => ({
-    title: x.title || x.name || '',
-    place_id: x.place_id || x.data_cid || '',
-    address: x.address || x.snippet || '',
-    phone: x.phone || '',
-    website: x.website || x.links?.website || '',
-    reviews: x.reviews || x.review_count,
-    type: x.type,
-    gps: x.gps_coordinates,
-  }));
+  const url = `https://serpapi.com/search.json?${params}`;
+  console.log(`${LOG} Maps request q=${JSON.stringify(query)} ll=${SD_COUNTY_LL}`);
+  let j;
+  try {
+    j = await fetchJson(url);
+  } catch (e) {
+    console.error(`${LOG} Maps fetch failed:`, e.message || e);
+    throw e;
+  }
+  if (j.error) {
+    console.error(`${LOG} SerpApi JSON error:`, j.error, 'metadata=', j.search_metadata || {});
+    return [];
+  }
+  const meta = j.search_metadata || {};
+  console.log(
+    `${LOG} Maps response status=${meta.status || 'n/a'} id=${meta.id || 'n/a'} time_taken=${meta.total_time_taken || '?'}s`
+  );
+  const locals = collectMapsLocalBlocks(j);
+  console.log(`${LOG} Maps merged local blocks count=${locals.length}`);
+  if (!locals.length && (j.local_results_state || j.search_information)) {
+    console.log(`${LOG} Maps empty hints:`, {
+      local_results_state: j.local_results_state,
+      search_information: j.search_information,
+    });
+  }
+  return locals.map((x) => {
+    const rev =
+      typeof x.reviews === 'number'
+        ? x.reviews
+        : x.review_count ?? x.reviews_count ?? x.reviews?.count ?? x.user_review?.reviews_count;
+    return {
+      title: x.title || x.name || '',
+      place_id: x.place_id || x.data_cid || x.data_cid_string || '',
+      address: x.address || x.snippet || x.address_lines?.join?.(', ') || '',
+      phone: x.phone || '',
+      website: x.website || x.links?.website || x.link || '',
+      reviews: rev,
+      type: x.type || x.types?.[0],
+      gps: x.gps_coordinates,
+    };
+  });
 }
 
 /**
@@ -76,7 +145,20 @@ export async function serpGoogleOrganic(query, apiKey, num = 5) {
     gl: 'us',
     num: String(num),
   });
-  const j = await fetchJson(`https://serpapi.com/search.json?${params}`);
+  const url = `https://serpapi.com/search.json?${params}`;
+  console.log(`${LOG} Organic request q=${JSON.stringify(query)} num=${num}`);
+  let j;
+  try {
+    j = await fetchJson(url);
+  } catch (e) {
+    console.error(`${LOG} Organic fetch failed:`, e.message || e);
+    return [];
+  }
+  if (j.error) {
+    console.error(`${LOG} Organic SerpApi error:`, j.error);
+    return [];
+  }
   const org = j.organic_results || [];
+  console.log(`${LOG} Organic hits=${org.length}`);
   return org.map((o) => ({ title: o.title, link: o.link, snippet: o.snippet }));
 }

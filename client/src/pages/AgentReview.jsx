@@ -12,12 +12,13 @@ export default function AgentReview() {
   const load = useCallback(async () => {
     setErr('');
     try {
-      const [runs, pendingProspects, emailDrafts] = await Promise.all([
+      const [runs, pendingProspects, emailDrafts, settings] = await Promise.all([
         api.agentRuns(25),
         api.agentSuggestedCompanies('pending'),
         api.agentEmailDrafts({ limit: 100 }),
+        api.settings(),
       ]);
-      setData({ runs, pendingFieldUpdates: [], pendingProspects, emailDrafts });
+      setData({ runs, pendingFieldUpdates: [], pendingProspects, emailDrafts, settings });
     } catch (e) {
       setErr(e.message);
     }
@@ -59,6 +60,7 @@ export default function AgentReview() {
   const prospects = data?.pendingProspects || [];
   const runs = data?.runs || [];
   const emailDrafts = data?.emailDrafts || [];
+  const settings = data?.settings;
 
   return (
     <>
@@ -101,7 +103,26 @@ export default function AgentReview() {
         <h3>New companies (pending)</h3>
         {prospects.length === 0 ? (
           <p className="sub" style={{ margin: 0 }}>
-            None pending. Discovery needs SerpApi + Anthropic keys in Settings.
+            {!settings ? (
+              <>No new prospects pending. Loading settings…</>
+            ) : settings.hasSerpApiKey && settings.hasApiKey ? (
+              <>
+                No new prospects pending approval. Use <strong>Run research agent now</strong> to run discovery
+                (SerpApi Maps + AI) for San Diego County: restoration, property management, HOA management, and
+                contractors. The scheduled agent also runs discovery on Mondays.
+              </>
+            ) : (
+              <>
+                No pending prospects. Discovery needs <strong>SerpAPI</strong> and <strong>Anthropic</strong> keys:
+                set <code>SERPAPI_API_KEY</code> and <code>ANTHROPIC_API_KEY</code> in the API environment, or save them
+                in Settings (written to <code>.tep-config.json</code> next to the server). The API also reads
+                uppercase keys in that file (e.g. <code>SERPAPI_API_KEY</code>). Optional: <code>TEP_CONFIG_PATH</code>{' '}
+                to point at your config file.
+                {settings && settings.tepConfigFilePresent === false ? (
+                  <> No <code>.tep-config.json</code> found at the API project path — env keys are still used if set.</>
+                ) : null}
+              </>
+            )}
           </p>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -221,7 +242,7 @@ export default function AgentReview() {
                   <td>{r.status}</td>
                   <td style={{ maxWidth: 360, fontSize: '0.85rem' }}>
                     {r.summary
-                      ? `${r.summary.vendorFieldUpdates ?? 0} field updates · ${r.summary.newProspects ?? 0} prospects`
+                      ? `${r.summary.vendorFieldUpdates ?? 0} field updates · ${r.summary.vendorsAutoRegistered ?? r.summary.newProspects ?? 0} vendors added · ${r.summary.outreachDraftsCreated ?? 0} drafts`
                       : '—'}
                     {r.summary?.skippedNoSearchKeys ? ' · no search keys' : ''}
                     {r.summary?.discoverySkippedNoSerpApi ? ' · discovery needs SerpApi' : ''}

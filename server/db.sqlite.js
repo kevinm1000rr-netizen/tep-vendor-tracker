@@ -3,6 +3,7 @@ import fs from 'fs';
 import { DB_PATH } from './paths.js';
 import { SEED_VENDORS } from './seed.js';
 import { VENDOR_TENURE_QUALIFICATION_SHORT } from './qualification.js';
+import { ensureAgentEmailDraftHasContact } from './ai.js';
 
 let db;
 
@@ -24,7 +25,7 @@ export function initDatabase() {
       email TEXT DEFAULT '',
       phone TEXT DEFAULT '',
       category TEXT NOT NULL CHECK (category IN ('restoration','property_mgmt','hoa','contractor')),
-      status TEXT NOT NULL DEFAULT 'not_sent' CHECK (status IN ('not_sent','sent','responded','approved')),
+      status TEXT NOT NULL DEFAULT 'not_sent' CHECK (status IN ('new','not_sent','sent','responded','approved')),
       date_sent TEXT,
       next_followup_date TEXT,
       notes TEXT DEFAULT '',
@@ -33,7 +34,8 @@ export function initDatabase() {
       years_in_business TEXT DEFAULT '',
       address TEXT DEFAULT '',
       created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
+      updated_at TEXT DEFAULT (datetime('now')),
+      source TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS followup_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +64,8 @@ export function initDatabase() {
   `);
 
   migrateVendorEnrichmentColumns();
+  migrateVendorStatusAuditColumns();
+  migrateVendorStatusNewAndSourceSqlite();
   migrateAgentTaskApprovalColumn();
   migrateResearchAgentTables();
   migrateAgentOverhaul();
@@ -126,6 +130,104 @@ function migrateVendorEnrichmentColumns() {
   add('website', "TEXT DEFAULT ''");
   add('years_in_business', "TEXT DEFAULT ''");
   add('address', "TEXT DEFAULT ''");
+}
+
+/** First time status → responded / approved (for review dashboard). */
+function migrateVendorStatusAuditColumns() {
+  const cols = new Set(db.prepare(`PRAGMA table_info(vendors)`).all().map((r) => r.name));
+  const add = (name, defSql) => {
+    if (!cols.has(name)) {
+      db.exec(`ALTER TABLE vendors ADD COLUMN ${name} ${defSql}`);
+      cols.add(name);
+    }
+  };
+  add('responded_at', 'TEXT');
+  add('approved_at', 'TEXT');
+}
+
+/**
+ * Allow vendor status `new` and column `source` (CSV import). SQLite cannot ALTER CHECK — rebuild table once.
+ */
+function migrateVendorStatusNewAndSourceSqlite() {
+  db.exec(`CREATE TABLE IF NOT EXISTS _m_vendor_status_v2 (id INTEGER PRIMARY KEY)`);
+  if (db.prepare(`SELECT 1 FROM _m_vendor_status_v2 WHERE id = 1`).get()) return;
+  const master = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vendors'`).get();
+  const createSql = String(master?.sql || '');
+  if (createSql.includes("'new'") && createSql.toLowerCase().includes('source')) {
+    db.prepare(`INSERT OR IGNORE INTO _m_vendor_status_v2 (id) VALUES (1)`).run();
+    return;
+  }
+  const cols = new Set(db.prepare(`PRAGMA table_info(vendors)`).all().map((r) => r.name));
+  if (!cols.has('source')) {
+    db.exec(`ALTER TABLE vendors ADD COLUMN source TEXT NOT NULL DEFAULT ''`);
+    cols.add('source');
+  }
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec(`CREATE TABLE vendors__new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      contact_person TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL CHECK (category IN ('restoration','property_mgmt','hoa','contractor')),
+      status TEXT NOT NULL DEFAULT 'not_sent' CHECK (status IN ('new','not_sent','sent','responded','approved')),
+      date_sent TEXT,
+      next_followup_date TEXT,
+      notes TEXT NOT NULL DEFAULT '',
+      letter_version_used TEXT NOT NULL DEFAULT '',
+      website TEXT NOT NULL DEFAULT '',
+      years_in_business TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      agent_enrichment_status TEXT NOT NULL DEFAULT 'searching',
+      research_miss_streak INTEGER NOT NULL DEFAULT 0,
+      research_week_id TEXT NOT NULL DEFAULT '',
+      responded_at TEXT,
+      approved_at TEXT,
+      source TEXT NOT NULL DEFAULT ''
+    )`);
+    db.exec(`
+      INSERT INTO vendors__new (
+        id, name, contact_person, email, phone, category, status, date_sent, next_followup_date,
+        notes, letter_version_used, website, years_in_business, address, created_at, updated_at,
+        agent_enrichment_status, research_miss_streak, research_week_id, responded_at, approved_at, source
+      )
+      SELECT
+        id, name,
+        COALESCE(contact_person, ''),
+        COALESCE(email, ''),
+        COALESCE(phone, ''),
+        category, status, date_sent, next_followup_date,
+        COALESCE(notes, ''),
+        COALESCE(letter_version_used, ''),
+        COALESCE(website, ''),
+        COALESCE(years_in_business, ''),
+        COALESCE(address, ''),
+        COALESCE(created_at, datetime('now')),
+        COALESCE(updated_at, datetime('now')),
+        COALESCE(agent_enrichment_status, 'searching'),
+        COALESCE(research_miss_streak, 0),
+        COALESCE(research_week_id, ''),
+        responded_at,
+        approved_at,
+        COALESCE(source, '')
+      FROM vendors
+    `);
+    db.exec(`DROP TABLE vendors`);
+    db.exec(`ALTER TABLE vendors__new RENAME TO vendors`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_vendors_category ON vendors(category)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_vendors_status ON vendors(status)`);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  } finally {
+    db.exec('PRAGMA foreign_keys=ON');
+  }
+  db.prepare(`INSERT OR IGNORE INTO _m_vendor_status_v2 (id) VALUES (1)`).run();
 }
 
 /** Legacy DBs: add approval column; existing rows default to approved so nothing breaks. */
@@ -229,6 +331,14 @@ export function updateVendor(id, patch) {
     if (patch[key] !== undefined) {
       sets.push(`${key} = ?`);
       vals.push(patch[key]);
+    }
+  }
+  if (patch.status !== undefined && prev && prev.status !== patch.status) {
+    if (patch.status === 'responded') {
+      sets.push("responded_at = COALESCE(responded_at, datetime('now'))");
+    }
+    if (patch.status === 'approved') {
+      sets.push("approved_at = COALESCE(approved_at, datetime('now'))");
     }
   }
   if (!sets.length) return getVendor(id);
@@ -659,7 +769,7 @@ function migrateLegacyResearchTablesIfPresent() {
           p.online_notes || ''
         );
       const newId = r.lastInsertRowid;
-      const draft = (p.outreach_email_draft || '').trim();
+      const draft = ensureAgentEmailDraftHasContact(p.outreach_email_draft || '').trim();
       if (draft) {
         const { subject, body } = splitEmailSubjectBody(draft);
         db.prepare(
@@ -947,6 +1057,7 @@ export function insertPendingNewProspect(row) {
   for (const u of evidenceUrls.slice(0, 8)) {
     if (u?.url) reasonParts.push(`${u.title || 'Source'}: ${u.url}`);
   }
+  const outreachEnsured = ensureAgentEmailDraftHasContact(row.outreach_email_draft || '');
   const r = db
     .prepare(
       `INSERT INTO suggested_companies (
@@ -966,14 +1077,14 @@ export function insertPendingNewProspect(row) {
       firstUrl,
       reasonParts.join('\n\n') || '',
       row.confidence_score != null ? Number(row.confidence_score) : 0.85,
-      row.outreach_email_draft || '',
+      outreachEnsured,
       row.dedupe_key,
       row.prospect_subtype || '',
       row.contact_person || '',
       row.online_notes || ''
     );
   const sid = r.lastInsertRowid;
-  const draftText = (row.outreach_email_draft || '').trim();
+  const draftText = outreachEnsured.trim();
   if (draftText) {
     const { subject, body } = splitEmailSubjectBody(draftText);
     db.prepare(
@@ -1076,7 +1187,7 @@ export function listBlockedVendorIdsForAgent() {
   return db
     .prepare(
       `SELECT id FROM vendors
-       WHERE status = 'not_sent'
+       WHERE status IN ('not_sent','new')
        AND (
          TRIM(COALESCE(email,'')) = ''
          OR TRIM(COALESCE(contact_person,'')) = ''
@@ -1092,7 +1203,7 @@ export function listBlockedCompaniesForReport() {
   const rows = db
     .prepare(
       `SELECT * FROM vendors
-       WHERE status = 'not_sent'
+       WHERE status IN ('not_sent','new')
        AND (
          TRIM(COALESCE(email,'')) = ''
          OR TRIM(COALESCE(contact_person,'')) = ''
@@ -1118,7 +1229,7 @@ export function listOpenIssuesForReport({ limit = 25 } = {}) {
   const stuck = db
     .prepare(
       `SELECT id, name, category, agent_enrichment_status, research_miss_streak FROM vendors
-       WHERE status = 'not_sent' AND COALESCE(research_miss_streak,0) >= 3
+       WHERE status IN ('not_sent','new') AND COALESCE(research_miss_streak,0) >= 3
        LIMIT 10`
     )
     .all();
@@ -1179,7 +1290,7 @@ export function getAgentReportSummary() {
   const vendorApprovals = db.prepare(`SELECT COUNT(*) AS n FROM vendors WHERE status = 'approved'`).get().n;
   const companiesBlocked = db
     .prepare(
-      `SELECT COUNT(*) AS n FROM vendors WHERE status = 'not_sent' AND (
+      `SELECT COUNT(*) AS n FROM vendors WHERE status IN ('not_sent','new') AND (
         TRIM(COALESCE(email,'')) = ''
         OR TRIM(COALESCE(contact_person,'')) = ''
         OR TRIM(COALESCE(phone,'')) = ''
@@ -1207,7 +1318,181 @@ export function getAgentReportSummary() {
   };
 }
 
+function addCalendarDayYmd(dayYmd, deltaDays) {
+  const d = new Date(`${dayYmd}T12:00:00`);
+  d.setDate(d.getDate() + deltaDays);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+/**
+ * Dashboard for Monthly Review page: daily KPIs, monthly rollup, 30-day activity, hourly timeline.
+ * @param {{ date?: string }} params — `date` = local calendar day `YYYY-MM-DD` from the client.
+ */
+export function getReviewDashboard(params = {}) {
+  const day =
+    typeof params.date === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(params.date.trim())
+      ? params.date.trim()
+      : new Date().toISOString().slice(0, 10);
+  const monthKey = day.slice(0, 7);
+  const dayStart = `${day} 00:00:00`;
+  const dayEnd = `${addCalendarDayYmd(day, 1)} 00:00:00`;
+
+  const cnt = (sql, ...args) => Number(db.prepare(sql).get(...args)?.n || 0);
+
+  const newCompaniesAgentToday = cnt(
+    `SELECT COUNT(*) AS n FROM agent_activity
+     WHERE activity_type = 'discovery_register' AND created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const newVendorRowsToday = cnt(
+    `SELECT COUNT(*) AS n FROM vendors WHERE created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const draftsCreatedToday = cnt(
+    `SELECT COUNT(*) AS n FROM agent_activity
+     WHERE activity_type = 'draft_created' AND created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const emailsSentToday = cnt(
+    `SELECT COUNT(*) AS n FROM agent_activity
+     WHERE activity_type IN ('email_sent','followup_email_sent')
+       AND created_at >= ? AND created_at < ?`,
+    dayStart,
+    dayEnd
+  );
+  const respondedToday = cnt(
+    `SELECT COUNT(*) AS n FROM vendors
+     WHERE COALESCE(TRIM(responded_at),'') != ''
+       AND (responded_at LIKE ? OR responded_at LIKE ?)`,
+    `${day} %`,
+    `${day}T%`
+  );
+  const partnershipsThisMonth = cnt(
+    `SELECT COUNT(*) AS n FROM vendors
+     WHERE status = 'approved'
+       AND COALESCE(TRIM(approved_at),'') != ''
+       AND substr(replace(replace(approved_at,'T',' '), ' ', ' '), 1, 7) = ?`,
+    monthKey
+  );
+
+  const monthlyContacted = cnt(
+    `SELECT COUNT(*) AS n FROM vendors
+     WHERE date_sent IS NOT NULL AND TRIM(date_sent) != ''
+       AND substr(trim(date_sent), 1, 7) = ?`,
+    monthKey
+  );
+  const monthlyRespondedAmongContacted = cnt(
+    `SELECT COUNT(*) AS n FROM vendors
+     WHERE date_sent IS NOT NULL AND TRIM(date_sent) != ''
+       AND substr(trim(date_sent), 1, 7) = ?
+       AND status IN ('responded','approved')`,
+    monthKey
+  );
+  const monthlyPartnershipsWithStamp = cnt(
+    `SELECT COUNT(*) AS n FROM vendors
+     WHERE status = 'approved'
+       AND COALESCE(TRIM(approved_at),'') != ''
+       AND substr(replace(replace(approved_at,'T',' '), ' ', ' '), 1, 7) = ?`,
+    monthKey
+  );
+  const responseRatePct =
+    monthlyContacted > 0
+      ? Math.round((monthlyRespondedAmongContacted / monthlyContacted) * 1000) / 10
+      : null;
+
+  const EST_PER_PARTNER_MONTHLY_USD = 3500;
+  const estimatedRevenuePotentialMonthly = monthlyPartnershipsWithStamp * EST_PER_PARTNER_MONTHLY_USD;
+
+  const chartStart = `${addCalendarDayYmd(day, -29)} 00:00:00`;
+  const chartEnd = dayEnd;
+  const activityBuckets = db
+    .prepare(
+      `SELECT substr(replace(replace(created_at,'T',' '), ' ', ' '), 1, 10) AS d,
+              activity_type AS t,
+              COUNT(*) AS c
+       FROM agent_activity
+       WHERE created_at >= ? AND created_at < ?
+         AND activity_type IN ('discovery_register','draft_created','email_sent','followup_email_sent')
+       GROUP BY d, t`
+    )
+    .all(chartStart, chartEnd);
+  const byDay = {};
+  for (let i = -29; i <= 0; i += 1) {
+    const d = addCalendarDayYmd(day, i);
+    byDay[d] = { date: d, discoveries: 0, drafts: 0, sends: 0 };
+  }
+  for (const row of activityBuckets) {
+    const b = byDay[row.d];
+    if (!b) continue;
+    if (row.t === 'discovery_register') b.discoveries += row.c;
+    if (row.t === 'draft_created') b.drafts += row.c;
+    if (row.t === 'email_sent' || row.t === 'followup_email_sent') b.sends += row.c;
+  }
+  const chart30 = Object.keys(byDay)
+    .sort()
+    .map((k) => byDay[k]);
+
+  const timelineRows = db
+    .prepare(
+      `SELECT a.activity_type, a.summary, a.created_at, v.name AS vendor_name
+       FROM agent_activity a
+       LEFT JOIN vendors v ON v.id = a.vendor_id
+       WHERE a.created_at >= ? AND a.created_at < ?
+       ORDER BY a.created_at ASC`
+    )
+    .all(dayStart, dayEnd);
+
+  const timelineByHour = Array.from({ length: 24 }, (_, hour) => ({
+    hour,
+    label: `${String(hour).padStart(2, '0')}:00`,
+    activities: /** @type {Array<{ created_at: string, activity_type: string, summary: string, vendor_name: string | null }>} */ ([]),
+  }));
+  for (const r of timelineRows) {
+    const raw = String(r.created_at || '').replace('T', ' ');
+    const hh = parseInt(raw.slice(11, 13), 10);
+    const hour = Number.isFinite(hh) ? hh : 0;
+    const slot = timelineByHour[Math.min(23, Math.max(0, hour))];
+    slot.activities.push({
+      created_at: r.created_at,
+      activity_type: r.activity_type,
+      summary: r.summary,
+      vendor_name: r.vendor_name || null,
+    });
+  }
+
+  return {
+    day,
+    monthKey,
+    daily: {
+      newCompaniesAgentToday,
+      newVendorRowsToday,
+      draftsCreatedToday,
+      emailsSentToday,
+      respondedToday,
+      partnershipsThisMonth,
+    },
+    monthly: {
+      contactedThisMonth: monthlyContacted,
+      respondedAmongContactedThisMonth: monthlyRespondedAmongContacted,
+      responseRatePct,
+      partnershipsEstablishedThisMonth: monthlyPartnershipsWithStamp,
+      estimatedRevenuePotentialMonthly,
+      estimatedRevenueNote:
+        'Rough pipeline: new approvals this month × $3,500/mo assumed partner job mix (adjust to your book of business).',
+    },
+    chart30,
+    timelineByHour,
+  };
+}
+
 export function upsertVendorOutreachDraft(vendorId, subject, body, { draft_type = 'outreach' } = {}) {
+  const bodySafe = ensureAgentEmailDraftHasContact(body || '');
   db.prepare(
     `DELETE FROM email_drafts WHERE vendor_id = ? AND suggested_company_id IS NULL AND draft_type = ? AND status IN ('draft','pending_kevin')`
   ).run(vendorId, draft_type);
@@ -1216,7 +1501,7 @@ export function upsertVendorOutreachDraft(vendorId, subject, body, { draft_type 
       `INSERT INTO email_drafts (vendor_id, suggested_company_id, subject, body, status, draft_type, created_at)
        VALUES (?, NULL, ?, ?, 'draft', ?, datetime('now'))`
     )
-    .run(vendorId, subject || '', body || '', draft_type);
+    .run(vendorId, subject || '', bodySafe, draft_type);
   return db.prepare(`SELECT * FROM email_drafts WHERE id = ?`).get(r.lastInsertRowid);
 }
 
@@ -1338,14 +1623,17 @@ export function insertVendor({
   website = '',
   years_in_business = '',
   address = '',
+  status = 'not_sent',
+  source = '',
 }) {
+  const st = ['new', 'not_sent', 'sent', 'responded', 'approved'].includes(status) ? status : 'not_sent';
   const r = db
     .prepare(
       `INSERT INTO vendors (
         name, contact_person, email, phone, category, status,
         date_sent, next_followup_date, notes, letter_version_used,
-        website, years_in_business, address, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'not_sent', NULL, NULL, ?, '', ?, ?, ?, datetime('now'), datetime('now'))`
+        website, years_in_business, address, source, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, '', ?, ?, ?, ?, datetime('now'), datetime('now'))`
     )
     .run(
       name,
@@ -1353,12 +1641,61 @@ export function insertVendor({
       email || '',
       phone || '',
       category,
+      st,
       notes || '',
       website || '',
       years_in_business || '',
-      address || ''
+      address || '',
+      source || ''
     );
   return getVendor(r.lastInsertRowid);
+}
+
+/**
+ * Bulk-insert mapped CSV rows (Tracker import). Skips duplicate names (loose dedupe).
+ * @param {Array<{ name: string, phone?: string, website?: string, address?: string, category: string, notes: string }>} rows
+ */
+export function importVendorsFromMappedRows(rows) {
+  const inserted = [];
+  const skipped = [];
+  const errors = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    const r = rows[i] || {};
+    const name = String(r.name || '').trim();
+    if (!name) {
+      errors.push({ row: i + 1, error: 'Missing company name' });
+      continue;
+    }
+    if (vendorNameExistsLoose(name)) {
+      skipped.push({ row: i + 1, name, reason: 'Similar name already in CRM' });
+      continue;
+    }
+    try {
+      const v = insertVendor({
+        name,
+        contact_person: '',
+        email: '',
+        phone: String(r.phone || '').trim(),
+        category: r.category || 'contractor',
+        notes: String(r.notes || '').trim(),
+        website: String(r.website || '').trim(),
+        years_in_business: '',
+        address: String(r.address || '').trim(),
+        status: 'new',
+        source: 'manual_import',
+      });
+      inserted.push(v);
+    } catch (e) {
+      errors.push({ row: i + 1, name, error: String(e.message || e) });
+    }
+  }
+  logAgentActivity({
+    activity_type: 'csv_import',
+    vendor_id: null,
+    summary: `CSV import: ${inserted.length} added, ${skipped.length} skipped`,
+    detail: { inserted: inserted.length, skipped: skipped.length, errorCount: errors.length },
+  });
+  return { insertedCount: inserted.length, skipped, errors, insertedIds: inserted.map((v) => v.id) };
 }
 
 const PENDING_VENDOR_FIELDS = new Set([
