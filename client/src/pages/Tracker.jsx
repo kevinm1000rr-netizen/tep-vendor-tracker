@@ -256,17 +256,10 @@ export default function Tracker() {
         aria-hidden
         onChange={onCsvFile}
       />
-      <div className="tracker-page-head no-print">
-        <div>
-          <h1 className="page-title">Vendor tracker</h1>
-          <p className="sub" style={{ marginBottom: 0 }}>
-            {vendors.length} companies · filters apply to the table · Monthly alerts tab shows due follow-ups.
-          </p>
-        </div>
-        <button type="button" className="primary tracker-import-csv-btn" onClick={() => csvFileRef.current?.click()}>
-          Import CSV
-        </button>
-      </div>
+      <h1 className="page-title">Vendor tracker</h1>
+      <p className="sub">
+        {vendors.length} companies · filters apply to the table · Monthly alerts tab shows due follow-ups.
+      </p>
       {err && <p style={{ color: 'var(--danger)' }}>{err}</p>}
 
       <div className="tabs">
@@ -295,6 +288,10 @@ export default function Tracker() {
             <option value="responded">Responded</option>
             <option value="approved">Approved</option>
           </select>
+          <span className="tracker-filters-spacer" aria-hidden="true" />
+          <button type="button" className="primary" onClick={() => csvFileRef.current?.click()}>
+            Import CSV
+          </button>
           <button type="button" onClick={() => downloadCsv()}>
             Export CSV
           </button>

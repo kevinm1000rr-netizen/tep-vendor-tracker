@@ -532,6 +532,10 @@ th {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+.tracker-filters-spacer {
+  flex: 1 1 auto;
+  min-width: 4px;
+}
 
 .toolbar {
   display: flex;
@@ -541,21 +545,6 @@ th {
   margin-bottom: 12px;
 }
 
-.tracker-page-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px 16px;
-  margin-bottom: 0.75rem;
-}
-.tracker-page-head .page-title {
-  margin-bottom: 0.25rem;
-}
-.tracker-import-csv-btn {
-  flex-shrink: 0;
-  align-self: flex-start;
-}
 .tracker-import-panel-head {
   display: flex;
   flex-wrap: wrap;
