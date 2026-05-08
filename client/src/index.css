@@ -199,6 +199,120 @@ th {
   border-color: #9ca3af;
 }
 
+.badge.permit-hot {
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+}
+.badge.permit-warm {
+  background: #f59e0b;
+  color: #111827;
+  border-color: #f59e0b;
+}
+.badge.permit-cold {
+  background: #6b7280;
+  color: #fff;
+  border-color: #6b7280;
+}
+.permit-nav-badge {
+  margin-left: 0.4rem;
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+}
+
+.permit-source-badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 6px;
+  color: #fff;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.permit-src--chula-vista {
+  background: #2563eb;
+}
+.permit-src--national-city {
+  background: #7c3aed;
+}
+.permit-src--el-cajon {
+  background: #ea580c;
+}
+.permit-src--la-mesa {
+  background: #0d9488;
+}
+.permit-src--poway {
+  background: #16a34a;
+}
+.permit-src--santee {
+  background: #d97706;
+}
+.permit-src--escondido {
+  background: #dc2626;
+}
+.permit-src--san-marcos {
+  background: #4338ca;
+}
+.permit-src--coronado {
+  background: #ca8a04;
+  color: #1c1917;
+}
+.permit-src--del-mar {
+  background: #0891b2;
+}
+.permit-src--solana-beach {
+  background: #65a30d;
+}
+.permit-src--san-diego {
+  background: #1e3a8a;
+}
+.permit-src--other {
+  background: #64748b;
+}
+
+.permit-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.4);
+  z-index: 120;
+  display: flex;
+  justify-content: flex-end;
+  animation: permit-fade-in 0.18s ease-out;
+}
+
+.permit-drawer-panel {
+  width: min(640px, 95vw);
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  padding: 1rem;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.2);
+  animation: permit-drawer-in 0.22s ease-out;
+}
+
+@keyframes permit-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes permit-drawer-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0.85;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
 .cat-pill {
   display: inline-block;
   padding: 0.2rem 0.5rem;
@@ -376,8 +490,35 @@ th {
   border: 1px solid var(--border);
   border-left: 4px solid var(--dash-accent, #2563eb);
 }
+button.dash-stat {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  margin: 0;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition:
+    box-shadow 0.15s ease,
+    transform 0.15s ease,
+    border-color 0.15s ease;
+}
+button.dash-stat:hover {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  border-color: var(--dash-accent, var(--border));
+  transform: translateY(-1px);
+}
+button.dash-stat:focus-visible {
+  outline: 2px solid var(--dash-accent, #2563eb);
+  outline-offset: 2px;
+}
 [data-theme='dark'] .dash-stat {
   background: var(--surface);
+}
+[data-theme='dark'] button.dash-stat:hover {
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
 }
 .dash-stat-num {
   font-size: 28px;
@@ -401,6 +542,22 @@ th {
 }
 .dash-stat--red {
   --dash-accent: #dc2626;
+}
+
+.agent-emails-ready-highlight {
+  animation: agent-emails-ready-glow 2.6s ease-out;
+  border-color: var(--dash-accent-ring, #2563eb);
+}
+@keyframes agent-emails-ready-glow {
+  0% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.45);
+  }
+  35% {
+    box-shadow: 0 0 0 6px rgba(37, 99, 235, 0.12);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+  }
 }
 
 .awaiting-banner {

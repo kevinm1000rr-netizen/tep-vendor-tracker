@@ -7,6 +7,7 @@ import {
   initDatabase,
   listVendors,
   getVendor,
+  deleteVendor,
   updateVendor,
   markSent,
   logFollowup,
@@ -29,6 +30,7 @@ import {
   listSuggestedCompanies,
   listEmailDrafts,
   getAgentReportSummary,
+  listSentEmailsForReport,
   getReviewDashboard,
   listEmailsReadyToSend,
   listBlockedCompaniesForReport,
@@ -40,6 +42,14 @@ import {
   listAgentActivity,
   vendorsAddedSince,
   importVendorsFromMappedRows,
+  listPermitLeads,
+  getPermitLead,
+  updatePermitLead,
+  listPermitAgentRuns,
+  getPermitLeadStats,
+  insertEmailDraftRecord,
+  getPermitAgentReportStats,
+  listHotPermitLeads,
 } from './db.js';
 import {
   getApiKey,
@@ -61,6 +71,7 @@ import {
   getSmtpPassMasked,
   OUTBOUND_FROM_EMAIL,
   isTepConfigFilePresent,
+  isAccelaApiConfigured,
 } from './config.js';
 import {
   generateVendorLetter,
@@ -73,9 +84,23 @@ import {
   getManualResearchLetterReason,
 } from './ai.js';
 import { buildOutreachResearchBrief } from './outreachResearch.js';
-import { ROOT } from './paths.js';
+import { ROOT, DB_PATH } from './paths.js';
 import { runResearchAgent, startResearchAgentScheduler, startLiveAgentLoop } from './researchAgent.js';
 import { sendTransactionalEmail } from './mailer.js';
+import { sendSMS, sendTestSMS } from './sms.js';
+import {
+  runPermitAgent,
+  startPermitAgentScheduler,
+  regeneratePermitLeadEmail,
+  generatePermitLeadCallScript,
+  getPermitLeadExportRows,
+} from './permitAgent.js';
+import { registerEstimateRoutes } from './estimateRoutes.js';
+import {
+  PERMIT_JURISDICTIONS,
+  ACCELA_STANDARDIZATION_NOTE,
+  CITIES_MONITORED_COUNT,
+} from './permitSourceRegistry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST = path.join(ROOT, 'dist');
@@ -125,8 +150,10 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/vendors', async (req, res) => {
   try {
-    const { category, status } = req.query;
-    res.json(await listVendors({ category, status }));
+    const { category, status, newThisMonth, blocked } = req.query;
+    const nm = newThisMonth === '1' || newThisMonth === 'true';
+    const bl = blocked === '1' || blocked === 'true';
+    res.json(await listVendors({ category, status, newThisMonth: nm, blocked: bl }));
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Failed' });
@@ -150,6 +177,18 @@ app.patch('/api/vendors/:id', async (req, res) => {
     const v = await updateVendor(id, req.body);
     if (!v) return res.status(404).json({ error: 'Not found' });
     res.json(v);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.delete('/api/vendors/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const v = await deleteVendor(id);
+    if (!v) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true, deleted: { id: v.id, name: v.name } });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Failed' });
@@ -459,13 +498,15 @@ app.post('/api/ai/monthly-review', async (_req, res) => {
 
 app.post('/api/agent/run-now', (_req, res) => {
   res.json({ ok: true, message: 'Research agent started in the background.' });
-  runResearchAgent({ discovery: true }).catch((e) => console.error('[research-agent]', e));
+  runResearchAgent().catch((e) => console.error('[research-agent]', e));
 });
 
 app.get('/api/agent/report', async (_req, res) => {
   try {
     res.json({
       summary: await getAgentReportSummary(),
+      permitSummary: await getPermitAgentReportStats(),
+      hotPermitLeads: await listHotPermitLeads(3),
       emailsReady: await listEmailsReadyToSend(),
       blocked: await listBlockedCompaniesForReport(),
       openIssues: await listOpenIssuesForReport({ limit: 25 }),
@@ -473,6 +514,17 @@ app.get('/api/agent/report', async (_req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: e.message || 'Report failed' });
+  }
+});
+
+app.get('/api/agent/sent-emails', async (req, res) => {
+  try {
+    const lim = req.query.limit != null ? Number(req.query.limit) : undefined;
+    const rows = await listSentEmailsForReport(Number.isFinite(lim) ? lim : undefined);
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed to load sent emails' });
   }
 });
 
@@ -573,6 +625,11 @@ app.post('/api/email/test', async (_req, res) => {
     console.error(e);
     res.status(500).json({ error: e.message || 'Test send failed' });
   }
+});
+
+app.post('/api/sms/test', async (_req, res) => {
+  const out = await sendTestSMS();
+  res.json(out);
 });
 
 app.get('/api/agent/runs', async (req, res) => {
@@ -738,6 +795,182 @@ app.get('/api/settings', (_req, res) => {
   });
 });
 
+app.get('/api/permits/sources', (_req, res) => {
+  res.json({
+    jurisdictions: PERMIT_JURISDICTIONS,
+    accelaStandardizationNote: ACCELA_STANDARDIZATION_NOTE,
+    citiesMonitored: CITIES_MONITORED_COUNT,
+    accelaConstructApiConfigured: isAccelaApiConfigured(),
+  });
+});
+
+app.get('/api/permits/leads', async (req, res) => {
+  try {
+    const { permit_type, city, source_city, status, minScore, min_score, search, view } = req.query;
+    const rows = await listPermitLeads({
+      permit_type,
+      city,
+      source_city,
+      status,
+      minScore: minScore ?? min_score,
+      search,
+      view,
+    });
+    res.json({ rows, stats: await getPermitLeadStats() });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/permits/leads/:id', async (req, res) => {
+  try {
+    const row = await getPermitLead(Number(req.params.id));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.patch('/api/permits/leads/:id', async (req, res) => {
+  try {
+    const row = await updatePermitLead(Number(req.params.id), req.body || {});
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/permits/run-now', async (_req, res) => {
+  try {
+    const out = await runPermitAgent();
+    res.json({ message: 'Agent started', runId: out?.runId ?? null, ...out });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed to run permit agent' });
+  }
+});
+
+app.get('/api/permits/runs', async (req, res) => {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : 30;
+    res.json(await listPermitAgentRuns(limit));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/permits/leads/:id/send-email', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const lead = await getPermitLead(id);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    if (!lead.contractor_email) return res.status(400).json({ error: 'Lead has no contractor email' });
+    const body = String(req.body?.email_draft || lead.email_draft || '').trim();
+    if (!body) return res.status(400).json({ error: 'No email draft available' });
+    const lines = body.split(/\r?\n/);
+    let subject = `Tri Express Plumbing + ${lead.contractor_name || 'Contractor'} (${lead.permit_type})`;
+    const sub = lines.find((l) => /^subject:\s*/i.test(l));
+    let text = body;
+    if (sub) {
+      subject = sub.replace(/^subject:\s*/i, '').trim();
+      text = lines.filter((l) => l !== sub).join('\n').trim();
+    }
+    const info = await sendTransactionalEmail({
+      to: lead.contractor_email,
+      toName: lead.contractor_name || '',
+      subject,
+      text,
+    });
+    await insertEmailDraftRecord({
+      subject,
+      body: text,
+      status: 'sent',
+      draft_type: 'permit_outreach',
+    });
+    const updated = await updatePermitLead(id, {
+      status: 'contacted',
+      email_draft: body,
+      notes: `${lead.notes || ''}\n[${new Date().toISOString().slice(0, 10)}] Outreach email sent.`,
+    });
+    await sendSMS(
+      `✅ Email sent to ${lead.contractor_name || 'contractor'} for ${lead.permit_type} permit at ${lead.address || 'project site'}`,
+      { alertType: 'permit_email_sent', eventKey: `lead:${id}` }
+    );
+    res.json({ success: true, messageId: info.messageId, lead: updated });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Send failed' });
+  }
+});
+
+app.post('/api/permits/leads/:id/regenerate-email', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const lead = await getPermitLead(id);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const draft = await regeneratePermitLeadEmail(lead);
+    const updated = await updatePermitLead(id, { email_draft: draft });
+    res.json(updated);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.post('/api/permits/leads/:id/call-script', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const lead = await getPermitLead(id);
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const text = await generatePermitLeadCallScript(lead);
+    res.json({ text });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Failed' });
+  }
+});
+
+app.get('/api/permits/export/csv', async (_req, res) => {
+  try {
+    const rows = await getPermitLeadExportRows();
+    const cols = [
+      'id',
+      'permit_number',
+      'source_city',
+      'permit_type',
+      'address',
+      'city',
+      'zip_code',
+      'contractor_name',
+      'contractor_license',
+      'contractor_phone',
+      'contractor_email',
+      'architect_name',
+      'project_value',
+      'date_submitted',
+      'status',
+      'lead_score',
+      'notes',
+      'sms_sent',
+      'created_at',
+    ];
+    const lines = [cols.join(',')];
+    for (const r of rows) lines.push(cols.map((c) => csvEscape(r[c])).join(','));
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="permit_leads_export.csv"');
+    res.send(lines.join('\n'));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: e.message || 'Export failed' });
+  }
+});
+
 app.post('/api/settings', (req, res) => {
   if (req.body?.clear) {
     saveApiKey('');
@@ -785,6 +1018,8 @@ app.post('/api/settings', (req, res) => {
   });
 });
 
+registerEstimateRoutes(app);
+
 if (fs.existsSync(DIST)) {
   app.use(express.static(DIST));
   app.get('*', (req, res, next) => {
@@ -795,12 +1030,12 @@ if (fs.existsSync(DIST)) {
 
 async function start() {
   await initDatabase();
-  app.listen(PORT, () => {
-    console.log(`TEP Vendor Tracker API http://127.0.0.1:${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`TEP Vendor Tracker API listening on 0.0.0.0:${PORT}`);
     if (process.env.DATABASE_URL) {
       console.log('[db] Using PostgreSQL (DATABASE_URL)');
     } else {
-      console.log('[db] Using SQLite vendor_tracker.db');
+      console.log('[db] Using SQLite at', DB_PATH);
     }
     if (fs.existsSync(DIST)) {
       console.log(`Serving SPA from ${DIST}`);
@@ -809,9 +1044,11 @@ async function start() {
     }
     if (getAgentAutoRun()) {
       startResearchAgentScheduler();
+      startPermitAgentScheduler();
       console.log(
         'Research & Outreach agent: cron daily at 06:00 server time; POST /api/agent/run-now to run manually.'
       );
+      console.log('Permit Intelligence agent: cron daily at 07:00 server time; POST /api/permits/run-now to run manually.');
     } else {
       console.log(
         'Research & Outreach agent: AGENT_AUTO_RUN=false — daily cron disabled; use POST /api/agent/run-now or Agent Review.'

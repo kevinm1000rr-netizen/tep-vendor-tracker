@@ -1,9 +1,11 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'path';
 import { DB_PATH } from './paths.js';
 import { SEED_VENDORS } from './seed.js';
 import { VENDOR_TENURE_QUALIFICATION_SHORT } from './qualification.js';
 import { ensureAgentEmailDraftHasContact } from './ai.js';
+import { CITIES_MONITORED_COUNT } from './permitSourceRegistry.js';
 
 let db;
 
@@ -13,6 +15,10 @@ export function getDb() {
 }
 
 export function initDatabase() {
+  const dir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
   const existed = fs.existsSync(DB_PATH);
   db = new Database(DB_PATH);
   db.pragma('journal_mode = WAL');
@@ -69,6 +75,13 @@ export function initDatabase() {
   migrateAgentTaskApprovalColumn();
   migrateResearchAgentTables();
   migrateAgentOverhaul();
+  migratePermitLeadTables();
+  migratePermitLeadsSourceCityComposite();
+  ensurePermitLeadsSourceCityIndex();
+  migratePermitLeadStatusExpand();
+  purgeWaterHeaterPermitLeads();
+  migrateCustomerLeadsTable();
+  migrateAgentLearningPermitCategorySqlite();
   migrateInflatedNewThisMonthOnce();
 
   /** Baseline import date for bundled directory — not “new this month” on first open. */
@@ -249,7 +262,7 @@ function collectMissingBusinessFields(v) {
   return missing;
 }
 
-export function listVendors({ category, status } = {}) {
+export function listVendors({ category, status, newThisMonth, blocked } = {}) {
   let sql = 'SELECT * FROM vendors WHERE 1=1';
   const params = [];
   if (category) {
@@ -260,12 +273,34 @@ export function listVendors({ category, status } = {}) {
     sql += ' AND status = ?';
     params.push(status);
   }
+  if (newThisMonth) {
+    sql += ` AND strftime('%Y-%m', COALESCE(created_at, '')) = strftime('%Y-%m', 'now', 'localtime')`;
+  }
+  if (blocked) {
+    sql += ` AND status IN ('not_sent','new') AND (
+        TRIM(COALESCE(email,'')) = ''
+        OR TRIM(COALESCE(contact_person,'')) = ''
+        OR TRIM(COALESCE(phone,'')) = ''
+      )`;
+  }
   sql += ' ORDER BY name COLLATE NOCASE';
   return db.prepare(sql).all(...params);
 }
 
 export function getVendor(id) {
   return db.prepare('SELECT * FROM vendors WHERE id = ?').get(id);
+}
+
+export function deleteVendor(id) {
+  const prev = getVendor(id);
+  if (!prev) return null;
+  db.prepare('DELETE FROM vendors WHERE id = ?').run(id);
+  try {
+    refreshAgentLearningForCategory(prev.category);
+  } catch {
+    /* ignore */
+  }
+  return prev;
 }
 
 function refreshAgentLearningForCategory(category) {
@@ -787,7 +822,7 @@ function migrateLegacyResearchTablesIfPresent() {
 function migrateAgentOverhaul() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS agent_learning (
-      category TEXT PRIMARY KEY CHECK (category IN ('restoration','property_mgmt','hoa','contractor')),
+      category TEXT PRIMARY KEY CHECK (category IN ('restoration','property_mgmt','hoa','contractor','permit_leads')),
       response_rate REAL NOT NULL DEFAULT 0,
       best_day_to_send TEXT NOT NULL DEFAULT '',
       best_subject_line TEXT NOT NULL DEFAULT '',
@@ -806,7 +841,7 @@ function migrateAgentOverhaul() {
     );
     CREATE INDEX IF NOT EXISTS idx_agent_activity_at ON agent_activity(created_at);
   `);
-  for (const cat of ['restoration', 'property_mgmt', 'hoa', 'contractor']) {
+  for (const cat of ['restoration', 'property_mgmt', 'hoa', 'contractor', 'permit_leads']) {
     db.prepare(`INSERT OR IGNORE INTO agent_learning (category) VALUES (?)`).run(cat);
   }
   const vcols = new Set(db.prepare(`PRAGMA table_info(vendors)`).all().map((r) => r.name));
@@ -838,6 +873,268 @@ function migrateAgentOverhaul() {
   }
 
   autoApplyPendingVendorUpdatesOnce();
+}
+
+function migrateAgentLearningPermitCategorySqlite() {
+  db.exec(`CREATE TABLE IF NOT EXISTS _m_agent_learning_permit_cat (id INTEGER PRIMARY KEY)`);
+  if (db.prepare(`SELECT 1 FROM _m_agent_learning_permit_cat WHERE id = 1`).get()) return;
+  const master = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_learning'`).get();
+  const createSql = String(master?.sql || '');
+  if (createSql.includes("'permit_leads'")) {
+    db.prepare(`INSERT OR IGNORE INTO _m_agent_learning_permit_cat (id) VALUES (1)`).run();
+    return;
+  }
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec(`CREATE TABLE agent_learning__new (
+      category TEXT PRIMARY KEY CHECK (category IN ('restoration','property_mgmt','hoa','contractor','permit_leads')),
+      response_rate REAL NOT NULL DEFAULT 0,
+      best_day_to_send TEXT NOT NULL DEFAULT '',
+      best_subject_line TEXT NOT NULL DEFAULT '',
+      avg_days_to_response INTEGER NOT NULL DEFAULT 0,
+      sent_count INTEGER NOT NULL DEFAULT 0,
+      responded_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`);
+    db.exec(`INSERT INTO agent_learning__new (
+      category, response_rate, best_day_to_send, best_subject_line, avg_days_to_response, sent_count, responded_count, updated_at
+    ) SELECT
+      category, COALESCE(response_rate,0), COALESCE(best_day_to_send,''), COALESCE(best_subject_line,''),
+      COALESCE(avg_days_to_response,0), COALESCE(sent_count,0), COALESCE(responded_count,0), COALESCE(updated_at, datetime('now'))
+    FROM agent_learning`);
+    db.exec(`DROP TABLE agent_learning`);
+    db.exec(`ALTER TABLE agent_learning__new RENAME TO agent_learning`);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  } finally {
+    db.exec('PRAGMA foreign_keys=ON');
+  }
+  db.prepare(`INSERT OR IGNORE INTO _m_agent_learning_permit_cat (id) VALUES (1)`).run();
+}
+
+function migratePermitLeadTables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS permit_leads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_number TEXT NOT NULL,
+      source_city TEXT NOT NULL DEFAULT 'San Diego',
+      permit_type TEXT NOT NULL CHECK (permit_type IN ('ADU','New Construction','Remodel','Water Heater','Addition')),
+      address TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      zip_code TEXT NOT NULL DEFAULT '',
+      contractor_name TEXT NOT NULL DEFAULT '',
+      contractor_license TEXT NOT NULL DEFAULT '',
+      contractor_phone TEXT NOT NULL DEFAULT '',
+      contractor_email TEXT NOT NULL DEFAULT '',
+      architect_name TEXT NOT NULL DEFAULT '',
+      project_value REAL NOT NULL DEFAULT 0,
+      date_submitted TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','pursuing','contacted','responded','converted','not_interested','deleted')),
+      lead_score INTEGER NOT NULL DEFAULT 1,
+      notes TEXT NOT NULL DEFAULT '',
+      email_draft TEXT NOT NULL DEFAULT '',
+      sms_sent INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      UNIQUE(permit_number, source_city)
+    );
+    CREATE INDEX IF NOT EXISTS idx_permit_leads_status ON permit_leads(status);
+    CREATE INDEX IF NOT EXISTS idx_permit_leads_date_submitted ON permit_leads(date_submitted);
+    CREATE INDEX IF NOT EXISTS idx_permit_leads_score ON permit_leads(lead_score);
+    CREATE TABLE IF NOT EXISTS permit_agent_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_date TEXT NOT NULL,
+      permits_found INTEGER NOT NULL DEFAULT 0,
+      new_leads_added INTEGER NOT NULL DEFAULT 0,
+      leads_contacted INTEGER NOT NULL DEFAULT 0,
+      summary TEXT NOT NULL DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS sms_alert_state (
+      alert_type TEXT NOT NULL,
+      event_key TEXT NOT NULL DEFAULT '',
+      last_sms_sent TEXT NOT NULL DEFAULT '',
+      PRIMARY KEY (alert_type, event_key)
+    );
+  `);
+}
+
+/** Legacy DBs: add source_city and composite uniqueness (permit_number + source_city). */
+function migratePermitLeadsSourceCityComposite() {
+  const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='permit_leads'`).get();
+  if (!t) return;
+  const cols = db.prepare(`PRAGMA table_info(permit_leads)`).all();
+  if (cols.some((c) => c.name === 'source_city')) return;
+
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec(`
+      CREATE TABLE permit_leads__new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        permit_number TEXT NOT NULL,
+        source_city TEXT NOT NULL DEFAULT 'San Diego',
+        permit_type TEXT NOT NULL CHECK (permit_type IN ('ADU','New Construction','Remodel','Water Heater','Addition')),
+        address TEXT NOT NULL DEFAULT '',
+        city TEXT NOT NULL DEFAULT '',
+        zip_code TEXT NOT NULL DEFAULT '',
+        contractor_name TEXT NOT NULL DEFAULT '',
+        contractor_license TEXT NOT NULL DEFAULT '',
+        contractor_phone TEXT NOT NULL DEFAULT '',
+        contractor_email TEXT NOT NULL DEFAULT '',
+        architect_name TEXT NOT NULL DEFAULT '',
+        project_value REAL NOT NULL DEFAULT 0,
+        date_submitted TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','pursuing','contacted','responded','converted','not_interested','deleted')),
+        lead_score INTEGER NOT NULL DEFAULT 1,
+        notes TEXT NOT NULL DEFAULT '',
+        email_draft TEXT NOT NULL DEFAULT '',
+        sms_sent INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(permit_number, source_city)
+      );
+      INSERT INTO permit_leads__new (
+        id, permit_number, source_city, permit_type, address, city, zip_code,
+        contractor_name, contractor_license, contractor_phone, contractor_email, architect_name,
+        project_value, date_submitted, status, lead_score, notes, email_draft, sms_sent, created_at
+      )
+      SELECT
+        id, permit_number, 'San Diego', permit_type, address, city, zip_code,
+        contractor_name, contractor_license, contractor_phone, contractor_email, architect_name,
+        project_value, date_submitted, status, lead_score, notes, email_draft, sms_sent, created_at
+      FROM permit_leads;
+      DROP TABLE permit_leads;
+      ALTER TABLE permit_leads__new RENAME TO permit_leads;
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_status ON permit_leads(status);
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_date_submitted ON permit_leads(date_submitted);
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_score ON permit_leads(lead_score);
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_source_city ON permit_leads(source_city);
+    `);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  } finally {
+    db.exec('PRAGMA foreign_keys=ON');
+  }
+  console.log('[db] Migrated permit_leads: source_city + composite unique (permit_number, source_city).');
+}
+
+/** Safe on legacy DBs: only runs after source_city column exists. */
+function ensurePermitLeadsSourceCityIndex() {
+  const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='permit_leads'`).get();
+  if (!t) return;
+  const cols = db.prepare(`PRAGMA table_info(permit_leads)`).all();
+  if (!cols.some((c) => c.name === 'source_city')) return;
+  try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_permit_leads_source_city ON permit_leads(source_city)`);
+  } catch (e) {
+    console.warn('[db] permit_leads source_city index skipped:', e?.message || e);
+  }
+}
+
+/**
+ * Broaden the permit_leads.status CHECK constraint to include 'pursuing' and 'deleted'.
+ * Detects via raw schema text from sqlite_master and recreates the table only when needed.
+ */
+function migratePermitLeadStatusExpand() {
+  const meta = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='permit_leads'`)
+    .get();
+  if (!meta?.sql) return;
+  if (meta.sql.includes(`'pursuing'`) && meta.sql.includes(`'deleted'`)) return;
+
+  db.exec('PRAGMA foreign_keys=OFF');
+  db.exec('BEGIN');
+  try {
+    db.exec(`
+      CREATE TABLE permit_leads__statusnew (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        permit_number TEXT NOT NULL,
+        source_city TEXT NOT NULL DEFAULT 'San Diego',
+        permit_type TEXT NOT NULL CHECK (permit_type IN ('ADU','New Construction','Remodel','Water Heater','Addition')),
+        address TEXT NOT NULL DEFAULT '',
+        city TEXT NOT NULL DEFAULT '',
+        zip_code TEXT NOT NULL DEFAULT '',
+        contractor_name TEXT NOT NULL DEFAULT '',
+        contractor_license TEXT NOT NULL DEFAULT '',
+        contractor_phone TEXT NOT NULL DEFAULT '',
+        contractor_email TEXT NOT NULL DEFAULT '',
+        architect_name TEXT NOT NULL DEFAULT '',
+        project_value REAL NOT NULL DEFAULT 0,
+        date_submitted TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','pursuing','contacted','responded','converted','not_interested','deleted')),
+        lead_score INTEGER NOT NULL DEFAULT 1,
+        notes TEXT NOT NULL DEFAULT '',
+        email_draft TEXT NOT NULL DEFAULT '',
+        sms_sent INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(permit_number, source_city)
+      );
+      INSERT INTO permit_leads__statusnew (
+        id, permit_number, source_city, permit_type, address, city, zip_code,
+        contractor_name, contractor_license, contractor_phone, contractor_email, architect_name,
+        project_value, date_submitted, status, lead_score, notes, email_draft, sms_sent, created_at
+      )
+      SELECT
+        id, permit_number, source_city, permit_type, address, city, zip_code,
+        contractor_name, contractor_license, contractor_phone, contractor_email, architect_name,
+        project_value, date_submitted, status, lead_score, notes, email_draft, sms_sent, created_at
+      FROM permit_leads;
+      DROP TABLE permit_leads;
+      ALTER TABLE permit_leads__statusnew RENAME TO permit_leads;
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_status ON permit_leads(status);
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_date_submitted ON permit_leads(date_submitted);
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_score ON permit_leads(lead_score);
+      CREATE INDEX IF NOT EXISTS idx_permit_leads_source_city ON permit_leads(source_city);
+    `);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  } finally {
+    db.exec('PRAGMA foreign_keys=ON');
+  }
+  console.log("[db] Expanded permit_leads.status CHECK to include 'pursuing' and 'deleted'.");
+}
+
+function migrateCustomerLeadsTable() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS customer_leads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      phone TEXT NOT NULL,
+      email TEXT NOT NULL,
+      service_type TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      zipcode TEXT NOT NULL DEFAULT '',
+      ai_estimate TEXT NOT NULL DEFAULT '',
+      estimated_range TEXT NOT NULL DEFAULT '',
+      urgency_level TEXT NOT NULL DEFAULT '',
+      photos_count INTEGER NOT NULL DEFAULT 0,
+      call_time_preference TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','called','booked','completed')),
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_customer_leads_status ON customer_leads(status);
+    CREATE INDEX IF NOT EXISTS idx_customer_leads_created ON customer_leads(created_at);
+  `);
+}
+
+/** Drop any pre-existing Water Heater rows; permit type was retired (already covered by other plumbers). */
+function purgeWaterHeaterPermitLeads() {
+  const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='permit_leads'`).get();
+  if (!t) return;
+  try {
+    const info = db.prepare(`DELETE FROM permit_leads WHERE permit_type='Water Heater'`).run();
+    if (info?.changes) {
+      console.log(`[db] Removed ${info.changes} Water Heater permit_leads row(s) (retired permit type).`);
+    }
+  } catch (e) {
+    console.warn('[db] purge Water Heater permit_leads skipped:', e?.message || e);
+  }
 }
 
 /** One-time / idempotent: apply queued field suggestions where the tracker field is still empty. */
@@ -1318,6 +1615,33 @@ export function getAgentReportSummary() {
   };
 }
 
+/** Sent outreach / follow-ups (email_drafts status sent) plus vendors marked sent with no draft row. */
+export function listSentEmailsForReport(limit = 500) {
+  const lim = Math.min(Math.max(Number(limit) || 500, 1), 1000);
+  const sql = `
+    SELECT u.company_name, u.date_sent, u.subject, u.vendor_id FROM (
+      SELECT v.name AS company_name,
+        COALESCE(NULLIF(TRIM(d.sent_at), ''), NULLIF(TRIM(v.date_sent), '')) AS date_sent,
+        COALESCE(NULLIF(TRIM(d.subject), ''), '—') AS subject,
+        v.id AS vendor_id
+      FROM email_drafts d
+      INNER JOIN vendors v ON v.id = d.vendor_id
+      WHERE d.status = 'sent' AND d.vendor_id IS NOT NULL
+      UNION ALL
+      SELECT v.name AS company_name,
+        TRIM(COALESCE(v.date_sent, '')) AS date_sent,
+        '—' AS subject,
+        v.id AS vendor_id
+      FROM vendors v
+      WHERE v.date_sent IS NOT NULL AND TRIM(COALESCE(v.date_sent, '')) != ''
+        AND NOT EXISTS (SELECT 1 FROM email_drafts d2 WHERE d2.vendor_id = v.id AND d2.status = 'sent')
+    ) u
+    ORDER BY u.date_sent DESC
+    LIMIT ?
+  `;
+  return db.prepare(sql).all(lim);
+}
+
 function addCalendarDayYmd(dayYmd, deltaDays) {
   const d = new Date(`${dayYmd}T12:00:00`);
   d.setDate(d.getDate() + deltaDays);
@@ -1778,4 +2102,319 @@ export function rejectPendingNewProspect(id) {
   if (!row || row.status !== 'pending') return { error: 'Not found or already reviewed' };
   setPendingNewProspectStatus(id, 'rejected');
   return { ok: true };
+}
+
+/**
+ * `view` is a coarse-grained tab filter applied when no explicit `status` is set:
+ *   pipeline (default) → exclude not_interested + deleted
+ *   pursue             → status IN (pursuing, contacted, responded, converted)
+ *   pass               → not_interested
+ *   deleted            → deleted
+ *   all                → no status restriction
+ */
+export function listPermitLeads({ permit_type, city, source_city, status, minScore, search, view } = {}) {
+  let sql = `SELECT * FROM permit_leads WHERE 1=1`;
+  const params = [];
+  if (permit_type) {
+    sql += ` AND permit_type = ?`;
+    params.push(permit_type);
+  }
+  if (source_city) {
+    sql += ` AND lower(source_city) = lower(?)`;
+    params.push(source_city);
+  }
+  if (city) {
+    sql += ` AND lower(city) = lower(?)`;
+    params.push(city);
+  }
+  if (status) {
+    sql += ` AND status = ?`;
+    params.push(status);
+  } else {
+    const v = String(view || 'pipeline').toLowerCase();
+    if (v === 'pursue') sql += ` AND status IN ('pursuing','contacted','responded','converted')`;
+    else if (v === 'pass') sql += ` AND status = 'not_interested'`;
+    else if (v === 'deleted') sql += ` AND status = 'deleted'`;
+    else if (v === 'all') {
+      /* no status restriction */
+    } else sql += ` AND status NOT IN ('not_interested','deleted')`;
+  }
+  if (Number.isFinite(Number(minScore))) {
+    sql += ` AND lead_score >= ?`;
+    params.push(Number(minScore));
+  }
+  if (search) {
+    sql += ` AND lower(contractor_name) LIKE ?`;
+    params.push(`%${String(search).toLowerCase()}%`);
+  }
+  sql += ` ORDER BY lead_score DESC, date_submitted DESC, id DESC`;
+  return db.prepare(sql).all(...params);
+}
+
+export function getPermitLead(id) {
+  return db.prepare(`SELECT * FROM permit_leads WHERE id = ?`).get(id);
+}
+
+export function getPermitLeadByPermitNumber(permitNumber) {
+  return db
+    .prepare(`SELECT * FROM permit_leads WHERE permit_number = ? ORDER BY id DESC LIMIT 1`)
+    .get(String(permitNumber || '').trim());
+}
+
+export function getPermitLeadBySourceAndPermitNumber(permitNumber, sourceCity) {
+  return db
+    .prepare(`SELECT * FROM permit_leads WHERE permit_number = ? AND lower(source_city) = lower(?)`)
+    .get(String(permitNumber || '').trim(), String(sourceCity || 'San Diego').trim());
+}
+
+export function insertPermitLead(row) {
+  const r = db
+    .prepare(
+      `INSERT INTO permit_leads (
+        permit_number, source_city, permit_type, address, city, zip_code, contractor_name, contractor_license,
+        contractor_phone, contractor_email, architect_name, project_value, date_submitted, status,
+        lead_score, notes, email_draft, sms_sent, created_at
+      ) VALUES (
+        @permit_number, @source_city, @permit_type, @address, @city, @zip_code, @contractor_name, @contractor_license,
+        @contractor_phone, @contractor_email, @architect_name, @project_value, @date_submitted, @status,
+        @lead_score, @notes, @email_draft, @sms_sent, datetime('now')
+      )`
+    )
+    .run({
+      permit_number: String(row.permit_number || '').trim(),
+      source_city: String(row.source_city || 'San Diego').trim() || 'San Diego',
+      permit_type: row.permit_type,
+      address: row.address || '',
+      city: row.city || '',
+      zip_code: row.zip_code || '',
+      contractor_name: row.contractor_name || '',
+      contractor_license: row.contractor_license || '',
+      contractor_phone: row.contractor_phone || '',
+      contractor_email: row.contractor_email || '',
+      architect_name: row.architect_name || '',
+      project_value: Number(row.project_value || 0),
+      date_submitted: row.date_submitted || '',
+      status: row.status || 'new',
+      lead_score: Math.max(1, Math.min(10, Number(row.lead_score || 1))),
+      notes: row.notes || '',
+      email_draft: row.email_draft || '',
+      sms_sent: row.sms_sent ? 1 : 0,
+    });
+  return getPermitLead(r.lastInsertRowid);
+}
+
+export function updatePermitLead(id, patch) {
+  const allowed = [
+    'status',
+    'notes',
+    'contractor_phone',
+    'contractor_email',
+    'email_draft',
+    'lead_score',
+    'sms_sent',
+    'contractor_name',
+    'contractor_license',
+    'architect_name',
+    'project_value',
+    'source_city',
+  ];
+  const sets = [];
+  const vals = [];
+  for (const key of allowed) {
+    if (patch[key] !== undefined) {
+      sets.push(`${key} = ?`);
+      if (key === 'sms_sent') vals.push(patch[key] ? 1 : 0);
+      else if (key === 'lead_score') vals.push(Math.max(1, Math.min(10, Number(patch[key] || 1))));
+      else vals.push(patch[key]);
+    }
+  }
+  if (!sets.length) return getPermitLead(id);
+  vals.push(id);
+  db.prepare(`UPDATE permit_leads SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  return getPermitLead(id);
+}
+
+export function listPermitAgentRuns(limit = 30) {
+  const lim = Math.min(Math.max(Number(limit) || 30, 1), 200);
+  return db.prepare(`SELECT * FROM permit_agent_runs ORDER BY id DESC LIMIT ?`).all(lim);
+}
+
+export function insertPermitAgentRun({
+  run_date,
+  permits_found = 0,
+  new_leads_added = 0,
+  leads_contacted = 0,
+  summary = '',
+}) {
+  const r = db
+    .prepare(
+      `INSERT INTO permit_agent_runs (run_date, permits_found, new_leads_added, leads_contacted, summary, created_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'))`
+    )
+    .run(run_date, Number(permits_found || 0), Number(new_leads_added || 0), Number(leads_contacted || 0), summary || '');
+  return db.prepare(`SELECT * FROM permit_agent_runs WHERE id = ?`).get(r.lastInsertRowid);
+}
+
+export function getPermitLeadStats() {
+  const today = new Date().toISOString().slice(0, 10);
+  const month = today.slice(0, 7);
+  const newToday = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE substr(created_at,1,10)=? AND status='new'`)
+    .get(today).n;
+  const activeTotal = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status IN ('new','pursuing','contacted','responded')`)
+    .get().n;
+  const contactedMonth = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status='contacted' AND substr(created_at,1,7)=?`)
+    .get(month).n;
+  const converted = db.prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status='converted'`).get().n;
+  const newBadge = db.prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status='new'`).get().n;
+  const pipelineCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status NOT IN ('not_interested','deleted')`)
+    .get().n;
+  const pursueCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status IN ('pursuing','contacted','responded','converted')`)
+    .get().n;
+  const passCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status='not_interested'`)
+    .get().n;
+  const deletedCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status='deleted'`)
+    .get().n;
+  return {
+    newToday,
+    activeTotal,
+    contactedMonth,
+    converted,
+    newBadge,
+    pipelineCount,
+    pursueCount,
+    passCount,
+    deletedCount,
+  };
+}
+
+export function updatePermitLearningSnapshot() {
+  const touched = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status IN ('contacted','responded','converted')`)
+    .get().n;
+  const responded = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE status IN ('responded','converted')`)
+    .get().n;
+  const rate = touched > 0 ? Math.round((responded / touched) * 1000) / 1000 : 0;
+  db.prepare(
+    `INSERT INTO agent_learning (category, response_rate, sent_count, responded_count, updated_at)
+     VALUES ('permit_leads', ?, ?, ?, datetime('now'))
+     ON CONFLICT(category) DO UPDATE SET
+       response_rate = excluded.response_rate,
+       sent_count = excluded.sent_count,
+       responded_count = excluded.responded_count,
+       updated_at = datetime('now')`
+  ).run(rate, touched, responded);
+}
+
+export function wasSmsSentToday(alertType, eventKey = '', today = new Date().toISOString().slice(0, 10)) {
+  const row = db
+    .prepare(`SELECT last_sms_sent FROM sms_alert_state WHERE alert_type = ? AND event_key = ?`)
+    .get(String(alertType || ''), String(eventKey || ''));
+  return String(row?.last_sms_sent || '') === today;
+}
+
+export function markSmsSent(alertType, eventKey = '', today = new Date().toISOString().slice(0, 10)) {
+  db.prepare(
+    `INSERT INTO sms_alert_state (alert_type, event_key, last_sms_sent)
+     VALUES (?, ?, ?)
+     ON CONFLICT(alert_type, event_key) DO UPDATE SET last_sms_sent = excluded.last_sms_sent`
+  ).run(String(alertType || ''), String(eventKey || ''), today);
+}
+
+export function insertEmailDraftRecord({
+  vendor_id = null,
+  suggested_company_id = null,
+  subject = '',
+  body = '',
+  status = 'sent',
+  draft_type = 'permit_outreach',
+}) {
+  const r = db
+    .prepare(
+      `INSERT INTO email_drafts (
+        vendor_id, suggested_company_id, subject, body, status, draft_type, created_at, sent_at
+      ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), CASE WHEN ? = 'sent' THEN datetime('now') ELSE NULL END)`
+    )
+    .run(vendor_id, suggested_company_id, subject, body, status, draft_type, status);
+  return db.prepare(`SELECT * FROM email_drafts WHERE id = ?`).get(r.lastInsertRowid);
+}
+
+export function getPermitAgentReportStats() {
+  const today = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  const newPermitLeadsToday = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE substr(created_at,1,10) = ?`)
+    .get(today).n;
+  const hotLeadsThisWeek = db
+    .prepare(`SELECT COUNT(*) AS n FROM permit_leads WHERE lead_score >= 8 AND date_submitted >= ?`)
+    .get(weekAgo).n;
+  const rows = db
+    .prepare(
+      `SELECT source_city, COUNT(*) AS cnt, COALESCE(SUM(lead_score),0) AS heat
+       FROM permit_leads
+       WHERE substr(created_at,1,10) >= ?
+       GROUP BY source_city`
+    )
+    .all(weekAgo);
+  const permitLeadsBySourceCityWeek = rows
+    .map((r) => ({ source_city: r.source_city, count: r.cnt, heat: r.heat }))
+    .sort((a, b) => (b.heat - a.heat) || (b.count - a.count));
+  const top = permitLeadsBySourceCityWeek[0];
+  const hottestSourceCityThisWeek = top
+    ? { source_city: top.source_city, count: top.count, heat: top.heat }
+    : null;
+  return {
+    newPermitLeadsToday,
+    hotLeadsThisWeek,
+    permitLeadsBySourceCityWeek,
+    hottestSourceCityThisWeek,
+    citiesMonitored: CITIES_MONITORED_COUNT,
+  };
+}
+
+export function listHotPermitLeads(limit = 3) {
+  const lim = Math.min(Math.max(Number(limit) || 3, 1), 25);
+  return db
+    .prepare(
+      `SELECT * FROM permit_leads
+       WHERE lead_score >= 8
+       ORDER BY lead_score DESC, date_submitted DESC, id DESC
+       LIMIT ?`
+    )
+    .all(lim);
+}
+
+export function insertCustomerLead(row) {
+  const r = db
+    .prepare(
+      `INSERT INTO customer_leads (
+        name, phone, email, service_type, description, zipcode,
+        ai_estimate, estimated_range, urgency_level, photos_count, call_time_preference, status, created_at
+      ) VALUES (
+        @name, @phone, @email, @service_type, @description, @zipcode,
+        @ai_estimate, @estimated_range, @urgency_level, @photos_count, @call_time_preference, @status, datetime('now')
+      )`
+    )
+    .run({
+      name: String(row.name || '').trim(),
+      phone: String(row.phone || '').trim(),
+      email: String(row.email || '').trim(),
+      service_type: String(row.service_type || '').trim(),
+      description: String(row.description || '').trim(),
+      zipcode: String(row.zipcode || '').trim(),
+      ai_estimate: String(row.ai_estimate || '').trim(),
+      estimated_range: String(row.estimated_range || '').trim(),
+      urgency_level: String(row.urgency_level || '').trim(),
+      photos_count: Math.max(0, Math.min(10, Number(row.photos_count) || 0)),
+      call_time_preference: String(row.call_time_preference || '').trim(),
+      status: String(row.status || 'new').trim() || 'new',
+    });
+  return db.prepare(`SELECT * FROM customer_leads WHERE id = ?`).get(r.lastInsertRowid);
 }

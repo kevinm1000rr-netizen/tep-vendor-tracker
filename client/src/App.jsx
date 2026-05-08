@@ -6,6 +6,7 @@ import MonthlyReview from './pages/MonthlyReview';
 import Settings from './pages/Settings';
 import AgentTasks from './pages/AgentTasks';
 import AgentReview from './pages/AgentReview';
+import PermitLeads from './pages/PermitLeads';
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/tracker" element={<Tracker />} />
         <Route path="/agent-tasks" element={<AgentTasks />} />
         <Route path="/agent-review" element={<AgentReview />} />
+        <Route path="/permits" element={<PermitLeads />} />
         <Route path="/monthly" element={<MonthlyReview />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" replace />} />

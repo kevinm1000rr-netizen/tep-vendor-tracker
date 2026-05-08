@@ -17,99 +17,141 @@ import {
   vendorHasPendingOutreachDraft,
   logAgentActivity,
   listBlockedVendorIdsForAgent,
+  listOverdue,
 } from './db.js';
 import * as ext from './externalSearch.js';
 import { buildOutreachResearchBrief } from './outreachResearch.js';
 import {
-  qualifyDiscoveryProspect,
   extractVendorFieldsFromSnippets,
   generateVendorLetter,
   ensureAgentEmailDraftHasContact,
   isManualResearchLetterOutput,
   getManualResearchLetterReason,
 } from './ai.js';
+import { sendSMS } from './sms.js';
 
 const MAX_VENDORS_ENRICH = 16;
 const MAX_BLOCKED_EXTRA_SERPS = 24;
-const MAX_PROSPECT_AI_CALLS = 36;
-const MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN = 14;
+const MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN = 25;
 const MAX_OUTREACH_DRAFTS_PER_RUN = 4;
 
 const CATEGORY_PRIORITY = { restoration: 0, property_mgmt: 1, hoa: 2, contractor: 3 };
 
 /**
- * San Diego County discovery — maps to vendor categories (restoration | property_mgmt | hoa | contractor).
- * `search_focus` guides AI triage (50+ units, franchises, recurring plumbing, etc.).
+ * Google Places Text Search specs. Most entries append `PLACES_DISCOVERY_LOCATION_SUFFIX` at request time;
+ * targeted rows set `appendLocationSuffix: false` and pass the full query string in `text`.
+ * Key: `GOOGLE_PLACES_API_KEY` (see `getGooglePlacesApiKey()` in config.js).
  */
-const DISCOVERY_QUERIES = [
+const DISCOVERY_PLACES_TEXT_SPECS = [
+  { text: 'water damage restoration San Diego', category: 'restoration', category_label: 'Water damage restoration', appendLocationSuffix: false },
+  { text: 'fire restoration contractor San Diego', category: 'restoration', category_label: 'Fire restoration contractor', appendLocationSuffix: false },
+  { text: 'mold remediation San Diego', category: 'restoration', category_label: 'Mold remediation', appendLocationSuffix: false },
+  { text: 'plumbing contractor San Diego', category: 'contractor', category_label: 'Plumbing contractor', appendLocationSuffix: false },
+  { text: 'facilities management San Diego', category: 'property_mgmt', category_label: 'Facilities management', appendLocationSuffix: false },
+  { text: 'commercial property management San Diego', category: 'property_mgmt', category_label: 'Commercial property management', appendLocationSuffix: false },
+  { text: 'apartment management company San Diego', category: 'property_mgmt', category_label: 'Apartment management company', appendLocationSuffix: false },
+  { text: 'condo association management San Diego', category: 'hoa', category_label: 'Condo association management', appendLocationSuffix: false },
+  { text: 'building maintenance contractor San Diego', category: 'contractor', category_label: 'Building maintenance contractor', appendLocationSuffix: false },
+  { text: 'insurance restoration contractor San Diego', category: 'restoration', category_label: 'Insurance restoration contractor', appendLocationSuffix: false },
+  { text: 'Lars Construction San Diego', category: 'contractor', category_label: 'Lars Construction', appendLocationSuffix: false },
+  { text: 'ATI Restoration San Diego', category: 'restoration', category_label: 'ATI Restoration', appendLocationSuffix: false },
   {
-    q: 'large apartment property management 200 units',
-    category: 'property_mgmt',
-    prospect_subtype: '50_plus_units',
-    search_focus:
-      'Property management firms likely managing 50+ residential units in San Diego County. Prioritize recurring plumbing (turnovers, boilers, common-area restrooms, irrigation).',
+    text: 'Christian Brothers Restoration San Diego',
+    category: 'restoration',
+    category_label: 'Christian Brothers Restoration',
+    appendLocationSuffix: false,
   },
-  {
-    q: 'commercial office building property management',
-    category: 'property_mgmt',
-    prospect_subtype: 'commercial_re_manager',
-    search_focus:
-      'Commercial real estate / building property managers (office, retail, mixed-use). Recurring maintenance plumbing.',
-  },
-  {
-    q: 'homeowners association management companies',
-    category: 'hoa',
-    prospect_subtype: 'hoa_management',
-    search_focus: 'Established HOA / community association management companies (not single HOAs without mgmt co.). Recurring vendor needs.',
-  },
-  {
-    q: 'community association management large HOA',
-    category: 'hoa',
-    prospect_subtype: 'large_community',
-    search_focus: 'Large planned communities / master associations with ongoing facilities spend.',
-  },
-  { q: 'Servpro restoration', category: 'restoration', prospect_subtype: 'franchise_servpro', search_focus: 'ServPro franchise locations only.' },
-  { q: 'ServiceMaster Restore', category: 'restoration', prospect_subtype: 'franchise_servicemaster', search_focus: 'ServiceMaster Restore franchise locations only.' },
-  { q: 'Paul Davis restoration', category: 'restoration', prospect_subtype: 'franchise_paul_davis', search_focus: 'Paul Davis Restoration franchise locations only.' },
-  {
-    q: 'full service hotel resort',
-    category: 'contractor',
-    prospect_subtype: 'hotel',
-    search_focus: 'Hotels and resorts — engineering / facilities plumbing, guest rooms, kitchens.',
-  },
-  {
-    q: 'unified school district office',
-    category: 'contractor',
-    prospect_subtype: 'school_district',
-    search_focus: 'K–12 school districts and large campus facilities (not small private tutors).',
-  },
-  {
-    q: 'hospital medical center campus',
-    category: 'contractor',
-    prospect_subtype: 'healthcare',
-    search_focus: 'Hospitals, medical centers, clinics with building engineering — recurring mechanical/plumbing.',
-  },
-  {
-    q: 'assisted living memory care senior living',
-    category: 'contractor',
-    prospect_subtype: 'senior_living',
-    search_focus: 'Senior living, assisted living, skilled nursing facilities — high plumbing touch.',
-  },
+  { text: 'ServiceMaster Restore San Diego', category: 'restoration', category_label: 'ServiceMaster Restore', appendLocationSuffix: false },
+  { text: 'Servpro San Diego', category: 'restoration', category_label: 'Servpro', appendLocationSuffix: false },
+  { text: 'storm damage restoration San Diego', category: 'restoration', category_label: 'Storm damage restoration', appendLocationSuffix: false },
+  { text: 'flood damage cleanup San Diego', category: 'restoration', category_label: 'Flood damage cleanup', appendLocationSuffix: false },
+  { text: 'property maintenance services San Diego', category: 'contractor', category_label: 'Property maintenance services', appendLocationSuffix: false },
+  { text: 'hoa property management San Diego', category: 'hoa', category_label: 'HOA property management', appendLocationSuffix: false },
+  { text: 'commercial plumbing contractor San Diego', category: 'contractor', category_label: 'Commercial plumbing contractor', appendLocationSuffix: false },
 ];
 
-const SD_MAPS_Q_SUFFIX = ' San Diego County CA';
+const DISCOVERY_QUERY_ROTATION_BATCH_SIZE = 10;
 
-const MIN_GOOGLE_REVIEWS = 10;
+const PLACES_DISCOVERY_LOCATION_SUFFIX = 'San Diego CA';
 
-/** For restoration franchise queries, listing title must match the target brand. */
-function matchesFranchiseDiscoveryName(name, prospectSubtype) {
-  const st = String(prospectSubtype || '');
-  if (!st.startsWith('franchise_')) return true;
-  const n = name.toLowerCase();
-  if (st === 'franchise_servpro') return n.includes('servpro');
-  if (st === 'franchise_servicemaster') return n.includes('servicemaster') || n.includes('service master');
-  if (st === 'franchise_paul_davis') return n.includes('paul davis');
-  return true;
+/** Google Places `types` that indicate lodging or food service — excluded from discovery registration. */
+const DISCOVERY_EXCLUDED_PLACE_TYPES = new Set([
+  'lodging',
+  'restaurant',
+  'food',
+  'cafe',
+  'meal_delivery',
+  'meal_takeaway',
+  'bar',
+  'night_club',
+]);
+
+/** Permanent exclusion list requested by Kevin for discovery registration. */
+const DISCOVERY_EXCLUDED_NAME_TERMS = [
+  'hotel',
+  'resort',
+  'spa',
+  'inn',
+  'suites',
+  'motel',
+  'lodge',
+];
+
+const DISCOVERY_EXCLUDED_NAME_PATTERN = new RegExp(`\\b(?:${DISCOVERY_EXCLUDED_NAME_TERMS.join('|')})\\b`, 'i');
+
+/**
+ * Drop hotels/motels/restaurants (and similar) using Places types and a light name check
+ * so generic queries like "restoration company" do not register irrelevant venues.
+ */
+function isExcludedLodgingOrRestaurantVenue(types, name) {
+  const tList = Array.isArray(types) ? types : [];
+  for (const x of tList) {
+    const id = String(x || '')
+      .trim()
+      .toLowerCase();
+    if (id && DISCOVERY_EXCLUDED_PLACE_TYPES.has(id)) return true;
+  }
+  const n = String(name || '').trim();
+  if (!n) return false;
+  return (
+    DISCOVERY_EXCLUDED_NAME_PATTERN.test(n) ||
+    /\b(hotels|motels|inns|resorts|bed\s+and\s+breakfast|b\s*&\s*b|hostel|lodging|restaurant|restaurants|diner|bistro|grill|eatery|tavern|pub|cafe)\b/i.test(
+      n
+    )
+  );
+}
+
+function rotateDiscoveryTextSpecs(runId) {
+  const all = DISCOVERY_PLACES_TEXT_SPECS;
+  if (all.length <= DISCOVERY_QUERY_ROTATION_BATCH_SIZE) return all;
+  const seed = Math.abs(Number(runId) || Date.now());
+  const offset = (seed * 5) % all.length;
+  const out = [];
+  for (let i = 0; i < DISCOVERY_QUERY_ROTATION_BATCH_SIZE; i += 1) {
+    out.push(all[(offset + i) % all.length]);
+  }
+  return out;
+}
+
+const MIN_PLACES_RATING = 4.0;
+const MIN_PLACES_USER_RATINGS_TOTAL = 20;
+
+function placesDedupeKey(placeId) {
+  const pid = String(placeId || '').trim();
+  return pid ? `gplace:${pid}` : '';
+}
+
+async function logDiscoveryActivity(runId, activity_type, summary, detail = {}) {
+  try {
+    await logAgentActivity({
+      activity_type,
+      vendor_id: null,
+      summary: String(summary || '').slice(0, 500),
+      detail: { ...detail, runId, iso_timestamp: new Date().toISOString() },
+    });
+  } catch (e) {
+    console.warn('[discovery] logAgentActivity failed:', e.message || e);
+  }
 }
 
 /** Parse optional "Subject: …" line from AI letter/draft output. */
@@ -150,6 +192,7 @@ function vendorMissingFields(v) {
 }
 
 async function isNameTaken(name, takenNames) {
+  if (DISCOVERY_EXCLUDED_NAME_PATTERN.test(String(name || '').trim())) return true;
   if (await vendorNameExistsLoose(name)) return true;
   const n = normalizeNameDedupe(name);
   if (!n) return true;
@@ -281,6 +324,10 @@ async function maybeAutoDraftOutreach(vendorId, summary, aiKey) {
       vendor_id: v.id,
       summary: 'Outreach email draft generated (auto)',
       detail: {},
+    });
+    await sendSMS(`📧 Tri Express: Email ready to send to ${v.name}. Open app to approve and send.`, {
+      alertType: 'email_ready',
+      eventKey: `vendor:${v.id}`,
     });
     summary.outreachDraftsCreated = (summary.outreachDraftsCreated || 0) + 1;
   } catch (e) {
@@ -484,162 +531,260 @@ async function enrichVendors(runId, summary, gKey, sKey, aiKey) {
   }
 }
 
-async function discoverNewProspects(runId, summary, sKey, aiKey) {
+/**
+ * Google Places Text Search + Place Details (`GOOGLE_PLACES_API_KEY` / `getGooglePlacesApiKey()`).
+ * Inserts only when rating >= 4.0, user_ratings_total >= 20, business_status === OPERATIONAL.
+ */
+async function discoverNewProspects(runId, summary, placesKey, aiKey) {
   const log = (...a) => console.log('[discovery]', ...a);
-  log('start runId=%s queries=%s aiBudget=%s', runId, DISCOVERY_QUERIES.length, MAX_PROSPECT_AI_CALLS);
+  const querySpecs = rotateDiscoveryTextSpecs(runId);
+  log('start runId=%s placesTextQueries=%s', runId, querySpecs.length);
+
+  await logDiscoveryActivity(runId, 'discovery_run_start', 'Discovery run started (Google Places Text Search + Details)', {
+    api: 'place/textsearch/json + place/details/json',
+    location_suffix: PLACES_DISCOVERY_LOCATION_SUFFIX,
+    query_pool_size: DISCOVERY_PLACES_TEXT_SPECS.length,
+    queries: querySpecs.map((s) =>
+      s.appendLocationSuffix === false ? String(s.text || '').trim() : `${s.text} ${PLACES_DISCOVERY_LOCATION_SUFFIX}`.trim()
+    ),
+  });
+
   const pendingList = await listPendingNewProspects({ status: 'pending' });
   const takenNames = new Set(pendingList.map((p) => normalizeNameDedupe(p.name)));
-  log('pending suggested_companies (queue) count=%s', pendingList.length);
-  let aiCalls = 0;
-  let mapsTotal = 0;
+  const seenRunKeys = new Set();
+
+  let textSearchRowsSeen = 0;
   let skippedDedupe = 0;
   let skippedVendor = 0;
-  let skippedQualify = 0;
-  let skippedRegistryCap = 0;
+  let skippedFilter = 0;
   let skippedLowReviews = 0;
-  let skippedNoWebsite = 0;
-  let skippedFranchiseMismatch = 0;
+  let skippedLowRating = 0;
+  let skippedNonOperational = 0;
+  let skippedNoDetails = 0;
+  let skippedExcludedVenueType = 0;
   let vendorsAutoRegistered = 0;
 
-  for (const spec of DISCOVERY_QUERIES) {
-    if (aiCalls >= MAX_PROSPECT_AI_CALLS) {
-      log('AI call budget exhausted (aiCalls=%s), stopping query loop', aiCalls);
-      break;
-    }
-    const mapsQ = `${spec.q}${SD_MAPS_Q_SUFFIX}`;
-    log('--- query spec category=%s subtype=%s mapsQ=%s', spec.category, spec.prospect_subtype || '—', mapsQ);
-    let locals;
+  for (const spec of querySpecs) {
+    const fullQuery =
+      spec.appendLocationSuffix === false
+        ? String(spec.text || '').trim()
+        : `${spec.text} ${PLACES_DISCOVERY_LOCATION_SUFFIX}`.trim();
+
+    await logDiscoveryActivity(runId, 'discovery_places_text_search', `Places Text Search: ${fullQuery}`, {
+      endpoint: 'https://maps.googleapis.com/maps/api/place/textsearch/json',
+      query: fullQuery,
+      crm_category: spec.category,
+      category_label: spec.category_label,
+    });
+
+    let rawResults;
     try {
-      locals = await ext.serpGoogleMapsLocal(mapsQ, sKey);
+      rawResults = await ext.googlePlacesTextSearchAll(fullQuery, placesKey, { maxPages: 2 });
     } catch (e) {
       const msg = e.message || String(e);
-      summary.errors.push(`Maps search "${mapsQ}": ${msg}`);
-      log('Maps ERROR q=%s: %s', mapsQ, msg);
+      summary.errors.push(`Places Text Search "${fullQuery}": ${msg}`);
+      await logDiscoveryActivity(runId, 'discovery_places_error', `Text Search failed: ${fullQuery}`, { query: fullQuery, error: msg });
+      log('places text search ERROR q=%s: %s', fullQuery, msg);
       continue;
     }
-    mapsTotal += locals.length;
-    log('Maps candidates for this query: %s (using up to 8 for triage)', locals.length);
-    for (const loc of locals.slice(0, 8)) {
-      if (aiCalls >= MAX_PROSPECT_AI_CALLS) break;
-      const name = (loc.title || '').trim();
-      if (!name) {
-        log('skip empty Maps title');
+
+    await logDiscoveryActivity(runId, 'discovery_places_text_results', `Text Search returned ${rawResults.length} raw result(s)`, {
+      query: fullQuery,
+      text_search_result_count: rawResults.length,
+    });
+
+    for (const hit of rawResults) {
+      if (vendorsAutoRegistered >= MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN) break;
+
+      const placeIdRaw = String(hit.place_id || '').trim();
+      textSearchRowsSeen += 1;
+
+      const tsName = String(hit.name || '').trim();
+      const tsAddr = String(hit.formatted_address || '').trim();
+      const tsRating = hit.rating != null ? Number(hit.rating) : null;
+      const tsTotal = hit.user_ratings_total != null ? Number(hit.user_ratings_total) : null;
+
+      await logDiscoveryActivity(runId, 'discovery_places_text_hit', `TextSearch row: ${tsName || placeIdRaw || '—'}`, {
+        query: fullQuery,
+        crm_category: spec.category,
+        place_id: placeIdRaw || undefined,
+        text_search_preview: {
+          name: tsName || undefined,
+          formatted_address: tsAddr || undefined,
+          rating: Number.isFinite(tsRating) ? tsRating : undefined,
+          user_ratings_total: Number.isFinite(tsTotal) ? tsTotal : undefined,
+          types: Array.isArray(hit.types) ? hit.types : undefined,
+        },
+      });
+
+      if (!placeIdRaw) {
+        skippedFilter += 1;
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', 'Skipped — no place_id from Text Search', {
+          query: fullQuery,
+          outcome: 'skipped',
+          skip_reason: 'no_place_id',
+        });
         continue;
       }
-      const placeId = String(loc.place_id || '').trim();
-      const dedupeKey = placeId ? `gplace:${placeId}` : `name:${normalizeNameDedupe(name)}`;
-      if (await pendingProspectDedupeExists(dedupeKey)) {
+
+      const dedupeKey = placesDedupeKey(placeIdRaw);
+      if (!dedupeKey) {
+        skippedFilter += 1;
+        continue;
+      }
+
+      if (seenRunKeys.has(dedupeKey)) {
         skippedDedupe += 1;
-        log('skip dedupe pending exists name=%s key=%s', name, dedupeKey);
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `Skipped — duplicate place in run: ${tsName}`, {
+          query: fullQuery,
+          place_id: placeIdRaw,
+          dedupe_key: dedupeKey,
+          outcome: 'skipped',
+          skip_reason: 'duplicate_in_run',
+        });
         continue;
       }
-      if (await isNameTaken(name, takenNames)) {
-        skippedVendor += 1;
-        log('skip name matches existing vendor or pending name=%s', name);
+      seenRunKeys.add(dedupeKey);
+
+      const tsTypes = Array.isArray(hit.types) ? hit.types : [];
+      if (isExcludedLodgingOrRestaurantVenue(tsTypes, tsName)) {
+        skippedExcludedVenueType += 1;
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `Filtered out (lodging/restaurant): ${tsName}`, {
+          query: fullQuery,
+          crm_category: spec.category,
+          place_id: placeIdRaw,
+          outcome: 'filtered_out',
+          filter_reason: 'excluded_lodging_or_restaurant',
+          text_search_preview: {
+            name: tsName || undefined,
+            types: tsTypes.length ? tsTypes : undefined,
+          },
+        });
         continue;
       }
 
-      const reviewCount = Number(loc.reviews) || 0;
-      if (reviewCount < MIN_GOOGLE_REVIEWS) {
-        skippedLowReviews += 1;
-        log('skip reviews=%s (need >=%s) name=%s', reviewCount, MIN_GOOGLE_REVIEWS, name);
-        continue;
-      }
-      if (!(String(loc.website || '').trim())) {
-        skippedNoWebsite += 1;
-        log('skip no listing website (online presence gate) name=%s', name);
-        continue;
-      }
-      if (!matchesFranchiseDiscoveryName(name, spec.prospect_subtype)) {
-        skippedFranchiseMismatch += 1;
-        log('skip franchise brand mismatch name=%s subtype=%s', name, spec.prospect_subtype || '—');
-        continue;
-      }
-
-      const evidenceUrls = [];
-      if (loc.website) evidenceUrls.push({ url: loc.website, title: `${name} — Maps listing website` });
-      let extraOrg = [];
+      let det;
       try {
-        extraOrg = await ext.serpGoogleOrganic(
-          `"${name}" San Diego website years business founded reviews online`,
-          sKey,
-          6
-        );
+        det = await ext.googlePlaceDetails(placeIdRaw, placesKey);
       } catch (e) {
-        log('organic optional fail for %s: %s', name, e.message || e);
-      }
-      for (const o of extraOrg) {
-        evidenceUrls.push({ url: o.link, title: o.title });
+        const msg = e.message || String(e);
+        summary.errors.push(`Place Details ${placeIdRaw}: ${msg}`);
+        await logDiscoveryActivity(runId, 'discovery_places_error', `Place Details failed: ${placeIdRaw}`, { place_id: placeIdRaw, error: msg });
+        skippedNoDetails += 1;
+        continue;
       }
 
-      const organicSnippets = extraOrg.map((o) => ({
-        title: o.title,
-        url: o.link,
-        snippet: o.snippet || '',
-      }));
+      if (!det) {
+        skippedNoDetails += 1;
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `No Place Details: ${tsName}`, {
+          query: fullQuery,
+          place_id: placeIdRaw,
+          outcome: 'skipped',
+          skip_reason: 'no_place_details',
+        });
+        continue;
+      }
 
-      const payload = {
-        companyName: name,
-        category: spec.category,
-        prospect_subtype: spec.prospect_subtype || null,
-        search_focus: spec.search_focus || '',
-        discoveryHardFilters: {
-          minGoogleReviews: MIN_GOOGLE_REVIEWS,
-          listingWebsiteRequired: true,
-          reviewCountObserved: reviewCount,
-        },
-        mapsListing: {
-          address: loc.address,
-          phone: loc.phone,
-          website: loc.website,
-          reviews: loc.reviews,
-          type: loc.type,
-        },
-        evidenceUrls,
-        organicSnippets,
+      const name = String(det.name || tsName || '').trim();
+      const phone = String(det.formatted_phone_number || '').trim();
+      const website = String(det.website || '').trim();
+      const address = String(det.formatted_address || tsAddr || '').trim();
+      const rating = det.rating != null ? Number(det.rating) : null;
+      const totalRatings = det.user_ratings_total != null ? Number(det.user_ratings_total) : NaN;
+      const totalRatingsN = Number.isFinite(totalRatings) ? totalRatings : 0;
+      const biz = String(det.business_status || '').toUpperCase();
+      const types = Array.isArray(det.types) ? det.types : [];
+      const mapUrl = det.url ? String(det.url) : '';
+
+      const detailExtract = {
+        query: fullQuery,
+        crm_category: spec.category,
+        category_label: spec.category_label,
+        place_id: placeIdRaw,
+        name,
+        phone: phone || undefined,
+        website: website || undefined,
+        address: address || undefined,
+        rating: rating != null && Number.isFinite(rating) ? rating : undefined,
+        user_ratings_total: totalRatingsN,
+        business_status: biz || undefined,
+        types,
+        maps_url: mapUrl || undefined,
       };
 
-      log(
-        'triage name=%s phone=%s addr=%s web=%s reviews=%s',
-        name,
-        (loc.phone || '').slice(0, 22),
-        (loc.address || '').slice(0, 48),
-        (loc.website || '').slice(0, 40),
-        loc.reviews ?? '—'
-      );
+      await logDiscoveryActivity(runId, 'discovery_places_details', `Place Details extracted: ${name}`, {
+        ...detailExtract,
+        dedupe_key: dedupeKey,
+      });
 
-      let out;
-      try {
-        out = await qualifyDiscoveryProspect(payload);
-        aiCalls += 1;
-      } catch (e) {
-        summary.errors.push(`Qualify ${name}: ${e.message || e}`);
-        log('qualify ERROR name=%s: %s', name, e.message || e);
+      if (isExcludedLodgingOrRestaurantVenue(types, name)) {
+        skippedExcludedVenueType += 1;
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `Filtered out (lodging/restaurant): ${name}`, {
+          ...detailExtract,
+          dedupe_key: dedupeKey,
+          outcome: 'filtered_out',
+          filter_reason: 'excluded_lodging_or_restaurant',
+        });
         continue;
       }
-      if (!out || !out.qualifies) {
-        skippedQualify += 1;
-        log(
-          'skip AI triage name=%s qualifies=false summary=%s',
-          name,
-          String(out?.evidenceSummary || out?.onlineNotes || 'no reason').slice(0, 160)
+
+      let filterReason = '';
+      if (!name) filterReason = 'empty_name';
+      else if (rating == null || !Number.isFinite(rating)) filterReason = 'missing_rating';
+      else if (rating < MIN_PLACES_RATING) filterReason = 'below_min_rating';
+      else if (totalRatingsN < MIN_PLACES_USER_RATINGS_TOTAL) filterReason = 'below_min_user_ratings_total';
+      else if (biz !== 'OPERATIONAL') filterReason = `business_status_not_operational:${biz || 'UNKNOWN'}`;
+
+      if (filterReason) {
+        if (filterReason === 'below_min_user_ratings_total') skippedLowReviews += 1;
+        else if (filterReason === 'below_min_rating') skippedLowRating += 1;
+        else if (filterReason.startsWith('business_status')) skippedNonOperational += 1;
+        else skippedFilter += 1;
+
+        await logDiscoveryActivity(
+          runId,
+          'discovery_places_candidate',
+          `Filtered out: ${name} — ${filterReason}`,
+          {
+            ...detailExtract,
+            dedupe_key: dedupeKey,
+            outcome: 'filtered_out',
+            filter_reason: filterReason,
+            thresholds: { min_rating: MIN_PLACES_RATING, min_user_ratings_total: MIN_PLACES_USER_RATINGS_TOTAL, require_status: 'OPERATIONAL' },
+          }
         );
         continue;
       }
 
-      if (vendorsAutoRegistered >= MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN) {
-        skippedRegistryCap += 1;
-        log('skip registry cap reached (%s this run)', MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN);
+      if (await pendingProspectDedupeExists(dedupeKey)) {
+        skippedDedupe += 1;
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `Skipped — pending queue: ${name}`, {
+          ...detailExtract,
+          dedupe_key: dedupeKey,
+          outcome: 'skipped',
+          skip_reason: 'pending_dedupe_key',
+        });
         continue;
       }
 
-      takenNames.add(normalizeNameDedupe(name));
-      const mergedEvidence = Array.isArray(out.evidenceUrls) && out.evidenceUrls.length ? out.evidenceUrls : evidenceUrls;
+      if (await isNameTaken(name, takenNames)) {
+        skippedVendor += 1;
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `Skipped — already in CRM: ${name}`, {
+          ...detailExtract,
+          dedupe_key: dedupeKey,
+          outcome: 'skipped',
+          skip_reason: 'existing_vendor_or_pending_name',
+        });
+        continue;
+      }
+
       const noteParts = [
-        'Source: live discovery agent (SerpApi + AI).',
-        out.evidenceSummary ? `Tenure / fit: ${out.evidenceSummary}` : '',
-        out.onlineNotes ? `Notes: ${out.onlineNotes}` : '',
-        spec.prospect_subtype ? `Focus: ${spec.prospect_subtype}` : '',
+        'Source: discovery agent (Google Places API — Text Search + Place Details).',
+        `Text query: ${fullQuery}`,
+        `CRM category: ${spec.category_label} (${spec.category}).`,
+        `Google types: ${types.length ? types.slice(0, 8).join(', ') : '—'}.`,
+        `Rating: ${rating}★ · user_ratings_total: ${totalRatingsN} · status: ${biz}.`,
+        mapUrl ? `Maps: ${mapUrl}` : '',
         `Dedupe: ${dedupeKey}`,
       ].filter(Boolean);
 
@@ -647,71 +792,104 @@ async function discoverNewProspects(runId, summary, sKey, aiKey) {
         const v = await insertVendor({
           name,
           category: spec.category,
-          contact_person: out.contactPerson || '',
-          email: (out.email || '').trim(),
-          phone: (out.phone || loc.phone || '').trim(),
-          website: (out.website || loc.website || '').trim(),
-          years_in_business: (out.yearsInBusiness || '').trim(),
-          address: (out.address || loc.address || '').trim(),
+          contact_person: '',
+          email: '',
+          phone,
+          website,
+          years_in_business: '',
+          address,
           notes: noteParts.join('\n\n'),
+          status: 'new',
+          source: 'discovery_agent',
         });
         vendorsAutoRegistered += 1;
+        takenNames.add(normalizeNameDedupe(name));
         summary.newProspects = (summary.newProspects || 0) + 1;
 
-        const draftRaw = ensureAgentEmailDraftHasContact(out.outreachEmailDraft || '');
-        if (draftRaw) {
-          const parsed = splitSubjectBodyFromLetterText(draftRaw);
-          let subject = parsed.subject;
-          let body = parsed.body;
-          if (!subject) subject = `Partnership — Tri Express Plumbing & ${name}`;
-          if (!body) body = draftRaw;
-          await upsertVendorOutreachDraft(v.id, subject, body, { draft_type: 'outreach' });
-          summary.outreachDraftsCreated = (summary.outreachDraftsCreated || 0) + 1;
-        } else if (aiKey && (v.email || '').trim()) {
+        if (aiKey && (v.email || '').trim()) {
           await maybeAutoDraftOutreach(v.id, summary, aiKey);
         }
 
+        const iso = new Date().toISOString();
         await logAgentActivity({
           activity_type: 'discovery_register',
           vendor_id: v.id,
-          summary: `Registry: auto-added ${name} (${spec.category})`,
-          detail: { runId, dedupeKey, evidenceCount: mergedEvidence.length },
+          summary: `Registry: auto-added ${name} (${spec.category}) [Google Places]`,
+          detail: {
+            runId,
+            dedupeKey,
+            place_id: placeIdRaw,
+            user_ratings_total: totalRatingsN,
+            rating,
+            query: fullQuery,
+            category_label: spec.category_label,
+            types,
+            business_status: biz,
+            iso_timestamp: iso,
+          },
         });
 
-        log(
-          'REGISTRY insert vendor id=%s name=%s phone=%s email=%s draft=%s',
-          v.id,
-          name,
-          (v.phone || '').slice(0, 22),
-          (v.email || '').includes('@') ? 'yes' : 'no',
-          draftRaw ? 'yes' : 'no'
-        );
+        await logDiscoveryActivity(runId, 'discovery_places_candidate', `Inserted: ${name}`, {
+          ...detailExtract,
+          dedupe_key: dedupeKey,
+          outcome: 'inserted',
+          vendor_id: v.id,
+        });
+
+        log('REGISTRY insert id=%s name=%s rating=%s user_ratings_total=%s', v.id, name, rating, totalRatingsN);
       } catch (e) {
         const msg = String(e.message || e);
         if (msg.includes('UNIQUE') || msg.includes('unique')) {
           skippedDedupe += 1;
-          log('skip vendor insert UNIQUE name=%s key=%s', name, dedupeKey);
+          await logDiscoveryActivity(runId, 'discovery_places_candidate', `Skipped — DB unique: ${name}`, {
+            ...detailExtract,
+            outcome: 'skipped',
+            skip_reason: 'unique_constraint',
+          });
+          log('skip UNIQUE name=%s', name);
           continue;
         }
         summary.errors.push(`Registry insert ${name}: ${msg}`);
+        await logDiscoveryActivity(runId, 'discovery_places_error', `Insert failed: ${name}`, { error: msg, ...detailExtract });
         log('REGISTRY ERROR name=%s: %s', name, msg);
       }
     }
+
+    if (vendorsAutoRegistered >= MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN) {
+      await logDiscoveryActivity(runId, 'discovery_cap', `Registry cap reached (${MAX_AUTO_VENDOR_REGISTRATIONS_PER_RUN} this run)`, {});
+      log('registry cap reached, stopping discovery');
+      break;
+    }
   }
+
   summary.vendorsAutoRegistered = vendorsAutoRegistered;
-  log(
-    'done vendorsAutoRegistered=%s newProspects=%s mapsRowsSeen=%s aiCalls=%s skippedDedupe=%s skippedVendor=%s skippedLowReviews=%s skippedNoWebsite=%s skippedFranchise=%s skippedQualify=%s skippedRegistryCap=%s',
+  summary.exclusionHits = skippedExcludedVenueType;
+  summary.discoveryStats = {
+    textSearchRowsSeen,
     vendorsAutoRegistered,
-    summary.newProspects,
-    mapsTotal,
-    aiCalls,
     skippedDedupe,
     skippedVendor,
     skippedLowReviews,
-    skippedNoWebsite,
-    skippedFranchiseMismatch,
-    skippedQualify,
-    skippedRegistryCap
+    skippedLowRating,
+    skippedNonOperational,
+    skippedNoDetails,
+    skippedFilter,
+    skippedExcludedVenueType,
+  };
+
+  await logDiscoveryActivity(
+    runId,
+    'discovery_run_complete',
+    `Discovery finished: ${vendorsAutoRegistered} inserted, ${skippedVendor} in CRM, ${skippedLowReviews} low reviews, ${skippedLowRating} low rating, ${skippedNonOperational} not OPERATIONAL, ${skippedExcludedVenueType} lodging/restaurant`,
+    summary.discoveryStats
+  );
+
+  log(
+    'done vendorsAutoRegistered=%s textSearchRowsSeen=%s skippedDedupe=%s skippedVendor=%s',
+    vendorsAutoRegistered,
+    textSearchRowsSeen,
+    skippedDedupe,
+    skippedVendor
   );
 }
 
@@ -771,6 +949,10 @@ async function ensureVendorOutreachDrafts(summary) {
         summary: 'Outreach email draft generated',
         detail: {},
       });
+      await sendSMS(`📧 Tri Express: Email ready to send to ${v.name}. Open app to approve and send.`, {
+        alertType: 'email_ready',
+        eventKey: `vendor:${v.id}`,
+      });
       summary.outreachDraftsCreated = (summary.outreachDraftsCreated || 0) + 1;
       n += 1;
     } catch (e) {
@@ -779,9 +961,28 @@ async function ensureVendorOutreachDrafts(summary) {
   }
 }
 
+async function sendOverdueFollowupAlerts() {
+  try {
+    const rows = await listOverdue();
+    for (const v of rows) {
+      const overdueDays = Math.max(0, -(Number(v.daysUntilFollowup) || 0));
+      if (overdueDays <= 7) continue;
+      await sendSMS(
+        `⏰ Tri Express: ${v.name} is overdue for follow-up by ${overdueDays} days. Open app to take action.`,
+        {
+          alertType: 'followup_overdue',
+          eventKey: `vendor:${v.id}`,
+        }
+      );
+    }
+  } catch (e) {
+    console.error('[sms] overdue follow-up alerts failed:', e?.message || e);
+  }
+}
+
 /**
- * Background agent: auto-enrich vendors, optional weekly discovery, queue outreach drafts.
- * @param {{ discovery?: boolean }} opts — set discovery true on Monday cron for new-company search
+ * Background agent: auto-enrich vendors, discovery (Google Places Text Search), outreach drafts.
+ * @param {{ discovery?: boolean }} opts — pass `{ discovery: false }` to skip new-company discovery
  */
 export async function runResearchAgent(opts = {}) {
   if (researchAgentRunBusy) {
@@ -789,16 +990,16 @@ export async function runResearchAgent(opts = {}) {
     return;
   }
   researchAgentRunBusy = true;
-  const { discovery = false } = opts;
+  const discoveryEnabled = opts.discovery !== false;
   let runId;
   const summary = {
     vendorFieldUpdates: 0,
     newProspects: 0,
     vendorsAutoRegistered: 0,
+    exclusionHits: 0,
     outreachDraftsCreated: 0,
     skippedNoSearchKeys: false,
-    discoverySkippedNoSerpApi: false,
-    skippedNoAiKeyForDiscovery: false,
+    discoverySkippedNoPlacesApi: false,
     errors: [],
   };
   try {
@@ -818,23 +1019,22 @@ export async function runResearchAgent(opts = {}) {
       await enrichVendors(runId, summary, gKey, sKey, aiKey);
     }
 
-    if (discovery) {
-      if (!sKey) {
-        summary.discoverySkippedNoSerpApi = true;
-        console.warn(
-          '[research-agent] Discovery skipped: SerpAPI key not resolved. Set SERPAPI_API_KEY (or SERPAPI_KEY / SERP_API_KEY) in the environment, or add serpApiKey / SERPAPI_API_KEY to .tep-config.json in the API project root (or path from TEP_CONFIG_PATH).'
-        );
-      } else if (!aiKey) {
-        summary.skippedNoAiKeyForDiscovery = true;
-        console.warn(
-          '[research-agent] Discovery skipped: Anthropic key not resolved. Set ANTHROPIC_API_KEY in the environment, or add anthropicApiKey / ANTHROPIC_API_KEY to .tep-config.json in the API project root (or path from TEP_CONFIG_PATH).'
-        );
+    if (discoveryEnabled) {
+      if (gKey) {
+        await discoverNewProspects(runId, summary, gKey, aiKey);
       } else {
-        await discoverNewProspects(runId, summary, sKey, aiKey);
+        summary.discoverySkippedNoPlacesApi = true;
+        console.warn(
+          '[research-agent] Discovery skipped: GOOGLE_PLACES_API_KEY not resolved. Set GOOGLE_PLACES_API_KEY in the environment, or add googlePlacesApiKey to .tep-config.json (see getGooglePlacesApiKey in config.js).'
+        );
+        await logDiscoveryActivity(runId, 'discovery_skipped', 'Discovery skipped — Google Places API key required (Text Search + Details)', {
+          hasGooglePlacesApiKey: false,
+        });
       }
     }
 
     await ensureVendorOutreachDrafts(summary);
+    await sendOverdueFollowupAlerts();
 
     await completeBackgroundAgentRun(runId, 'completed', summary, '');
   } catch (e) {
@@ -846,16 +1046,15 @@ export async function runResearchAgent(opts = {}) {
   }
 }
 
-/** Cron + callers: discovery defaults to Mondays only; pass `{ discovery: true }` to force prospecting. */
+/** Cron + callers: discovery runs every day unless `{ discovery: false }`. */
 export async function runResearchAndOutreachAgent(opts = {}) {
-  const isMonday = new Date().getDay() === 1;
   return runResearchAgent({
     ...opts,
-    discovery: opts.discovery !== undefined ? Boolean(opts.discovery) : isMonday,
+    discovery: opts.discovery !== undefined ? Boolean(opts.discovery) : true,
   });
 }
 
-/** Daily 06:00 — enrich + drafts; prospect discovery on Mondays. */
+/** Daily 06:00 — enrich + discovery (Google Places) + drafts. */
 export function startResearchAgentScheduler() {
   cron.schedule('0 6 * * *', () => {
     runResearchAndOutreachAgent().catch((err) => console.error('[research-agent]', err));
@@ -872,10 +1071,10 @@ export function startLiveAgentLoop() {
   if (liveAgentIntervalHandle) clearInterval(liveAgentIntervalHandle);
   const ms = mins * 60 * 1000;
   console.log(
-    `[live-agent] Running every ${mins} min (enrich + San Diego discovery + auto-registry + drafts). Overlap skipped if a run is still in progress.`
+    `[live-agent] Running every ${mins} min (enrich + Google Places discovery + auto-registry + drafts). Overlap skipped if a run is still in progress.`
   );
   const tick = () => {
-    runResearchAgent({ discovery: true }).catch((err) => console.error('[live-agent]', err));
+    runResearchAgent().catch((err) => console.error('[live-agent]', err));
   };
   liveAgentIntervalHandle = setInterval(tick, ms);
   setTimeout(tick, 15_000);

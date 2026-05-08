@@ -133,6 +133,17 @@ export default function Settings() {
     }
   };
 
+  const testSms = async () => {
+    setMsg('');
+    setErr('');
+    try {
+      await api.testSms();
+      setMsg('Test SMS sent (or skipped if already sent today) to ALERT_PHONE.');
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
   return (
     <>
       <h1 className="page-title">Settings</h1>
@@ -234,6 +245,9 @@ export default function Settings() {
           </button>
           <button type="button" onClick={testSmtp} disabled={!smtpConfigured}>
             Test email
+          </button>
+          <button type="button" onClick={testSms}>
+            Test SMS
           </button>
         </div>
       </div>

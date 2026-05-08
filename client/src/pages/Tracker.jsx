@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api, downloadCsv } from '../api';
 import StatusBadge from '../components/StatusBadge';
 import { categoryBadgeShort, daysSince, LETTER_VERSION_TAG } from '../lib/labels';
@@ -17,11 +18,15 @@ const emptyEdit = {
 };
 
 export default function Tracker() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const filterCat = searchParams.get('category') || '';
+  const filterStatus = searchParams.get('status') || '';
+  const blockedOnly = searchParams.get('blocked') === '1';
+  const newThisMonthOnly = searchParams.get('newThisMonth') === '1';
+
   const [tab, setTab] = useState('all');
   const [vendors, setVendors] = useState([]);
   const [alerts, setAlerts] = useState([]);
-  const [filterCat, setFilterCat] = useState('');
-  const [filterStatus, setFilterStatus] = useState('');
   const [expanded, setExpanded] = useState(null);
   /** After opening a row: which field to focus (inline forms, no modals). */
   const [editFocus, setEditFocus] = useState(null);
@@ -45,13 +50,15 @@ export default function Tracker() {
       const q = {};
       if (filterCat) q.category = filterCat;
       if (filterStatus) q.status = filterStatus;
+      if (newThisMonthOnly) q.newThisMonth = '1';
+      if (blockedOnly) q.blocked = '1';
       const [v, a] = await Promise.all([api.vendors(q), api.alerts()]);
       setVendors(v);
       setAlerts(a);
     } catch (e) {
       setErr(e.message);
     }
-  }, [filterCat, filterStatus]);
+  }, [filterCat, filterStatus, newThisMonthOnly, blockedOnly]);
 
   useEffect(() => {
     load();
@@ -112,6 +119,21 @@ export default function Tracker() {
     await api.markSent(expanded, LETTER_VERSION_TAG);
     await load();
     setAiLetter('');
+  };
+
+  const removeVendor = async (v) => {
+    const ok = window.confirm(
+      `Delete ${v?.name || 'this company'}?\n\nThis permanently removes the vendor from tracking.`
+    );
+    if (!ok) return;
+    setErr('');
+    try {
+      await api.deleteVendor(v.id);
+      if (expanded === v.id) closePanel();
+      await load();
+    } catch (e) {
+      setErr(e.message || 'Delete failed');
+    }
   };
 
   const logFollow = async () => {
@@ -244,6 +266,9 @@ export default function Tracker() {
     }
   };
 
+  const hasActiveFilters = Boolean(filterCat || filterStatus || blockedOnly || newThisMonthOnly);
+  const clearAllFilters = () => setSearchParams(new URLSearchParams());
+
   const rows = tab === 'alerts' ? alerts : vendors;
 
   return (
@@ -272,15 +297,69 @@ export default function Tracker() {
       </div>
 
       {tab === 'all' && (
-        <div className="tracker-filters no-print">
-          <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}>
+        <div className="no-print" style={{ marginBottom: '12px' }}>
+          {hasActiveFilters && (
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                gap: '0.4rem',
+                marginBottom: '0.5rem',
+              }}
+            >
+              <strong style={{ fontSize: '0.85rem' }}>Active filters:</strong>
+              {filterCat ? <span className="badge">Category: {filterCat}</span> : null}
+              {filterStatus ? <span className="badge">Status: {filterStatus}</span> : null}
+              {newThisMonthOnly ? <span className="badge">New this month</span> : null}
+              {blockedOnly ? <span className="badge">Blocked missing info</span> : null}
+              <button type="button" className="ghost" onClick={clearAllFilters}>
+                Clear all filters
+              </button>
+            </div>
+          )}
+          {(blockedOnly || newThisMonthOnly) && (
+            <p className="sub" style={{ margin: '0 0 0.5rem' }}>
+              {blockedOnly
+                ? 'Showing blocked companies only (missing email, contact name, or phone). Change category/status below to widen the list.'
+                : 'Showing companies added this calendar month only. Change category/status below to widen the list.'}
+            </p>
+          )}
+          <div className="tracker-filters">
+          <select
+            value={filterCat}
+            onChange={(e) => {
+              const v = e.target.value;
+              setSearchParams((prev) => {
+                const p = new URLSearchParams(prev);
+                if (v) p.set('category', v);
+                else p.delete('category');
+                p.delete('blocked');
+                p.delete('newThisMonth');
+                return p;
+              });
+            }}
+          >
             <option value="">All categories</option>
             <option value="restoration">Restoration</option>
             <option value="property_mgmt">Property management</option>
             <option value="hoa">HOA</option>
             <option value="contractor">ADU / Contractor</option>
           </select>
-          <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
+          <select
+            value={filterStatus}
+            onChange={(e) => {
+              const v = e.target.value;
+              setSearchParams((prev) => {
+                const p = new URLSearchParams(prev);
+                if (v) p.set('status', v);
+                else p.delete('status');
+                p.delete('blocked');
+                p.delete('newThisMonth');
+                return p;
+              });
+            }}
+          >
             <option value="">All statuses</option>
             <option value="new">New</option>
             <option value="not_sent">Not sent</option>
@@ -295,6 +374,7 @@ export default function Tracker() {
           <button type="button" onClick={() => downloadCsv()}>
             Export CSV
           </button>
+          </div>
         </div>
       )}
 
@@ -478,6 +558,15 @@ export default function Tracker() {
                             aria-label="Log follow-up"
                           >
                             📞
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-icon"
+                            onClick={() => removeVendor(v)}
+                            title="Delete company"
+                            aria-label="Delete company"
+                          >
+                            🗑️
                           </button>
                         </>
                       )}

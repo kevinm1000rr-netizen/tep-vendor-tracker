@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import { useEffect, useState } from 'react';
+import { api } from '../api';
 
 const THEME_KEY = 'tep-theme';
 
@@ -14,11 +15,29 @@ function readStoredTheme() {
 
 export default function Layout({ children }) {
   const [theme, setTheme] = useState(readStoredTheme);
+  const [permitBadge, setPermitBadge] = useState(0);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme === 'dark' ? 'dark' : 'light');
     localStorage.setItem(THEME_KEY, theme);
   }, [theme]);
+
+  useEffect(() => {
+    let t;
+    const load = async () => {
+      try {
+        const r = await api.permitLeads({ status: 'new' });
+        setPermitBadge(Number(r?.stats?.newBadge || 0));
+      } catch {
+        setPermitBadge(0);
+      }
+      t = window.setTimeout(load, 30000);
+    };
+    load();
+    return () => {
+      if (t) window.clearTimeout(t);
+    };
+  }, []);
 
   return (
     <div className="layout">
@@ -39,6 +58,9 @@ export default function Layout({ children }) {
           </NavLink>
           <NavLink className={({ isActive }) => (isActive ? 'active' : '')} to="/agent-review">
             🔍 Agent Review
+          </NavLink>
+          <NavLink className={({ isActive }) => (isActive ? 'active' : '')} to="/permits">
+            ⚡ Permit Leads {permitBadge > 0 ? <span className="badge permit-nav-badge">{permitBadge}</span> : null}
           </NavLink>
           <NavLink className={({ isActive }) => (isActive ? 'active' : '')} to="/monthly">
             📈 Review

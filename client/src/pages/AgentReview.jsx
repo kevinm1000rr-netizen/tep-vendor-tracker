@@ -3,6 +3,25 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { categoryLabel } from '../lib/labels';
 
+function parseDiscoveryStatsMaybe(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const m = s.match(/skippedExcludedVenueType\s*=\s*(\d+)/i);
+  if (!m) return null;
+  return { skippedExcludedVenueType: Number(m[1]) || 0 };
+}
+
+function getExclusionHits(summary) {
+  if (!summary) return 0;
+  const top = Number(summary.exclusionHits);
+  if (Number.isFinite(top) && top > 0) return top;
+  const nested = parseDiscoveryStatsMaybe(summary.discoveryStats);
+  const n = Number(nested?.skippedExcludedVenueType);
+  return Number.isFinite(n) ? n : 0;
+}
+
 export default function AgentReview() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState('');
@@ -242,11 +261,10 @@ export default function AgentReview() {
                   <td>{r.status}</td>
                   <td style={{ maxWidth: 360, fontSize: '0.85rem' }}>
                     {r.summary
-                      ? `${r.summary.vendorFieldUpdates ?? 0} field updates · ${r.summary.vendorsAutoRegistered ?? r.summary.newProspects ?? 0} vendors added · ${r.summary.outreachDraftsCreated ?? 0} drafts`
+                      ? `${r.summary.vendorFieldUpdates ?? 0} field updates · ${r.summary.vendorsAutoRegistered ?? r.summary.newProspects ?? 0} vendors added · ${r.summary.outreachDraftsCreated ?? 0} drafts · ${getExclusionHits(r.summary)} exclusion hits`
                       : '—'}
                     {r.summary?.skippedNoSearchKeys ? ' · no search keys' : ''}
-                    {r.summary?.discoverySkippedNoSerpApi ? ' · discovery needs SerpApi' : ''}
-                    {r.summary?.skippedNoAiKeyForDiscovery ? ' · discovery needs Anthropic key' : ''}
+                    {r.summary?.discoverySkippedNoPlacesApi ? ' · discovery needs Google Places key' : ''}
                   </td>
                   <td style={{ color: r.error_message ? 'var(--danger)' : undefined, fontSize: '0.85rem' }}>
                     {r.error_message || '—'}

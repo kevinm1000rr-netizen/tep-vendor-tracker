@@ -40,6 +40,27 @@ export async function initDatabase() {
   if (!conn) throw new Error('DATABASE_URL is required for PostgreSQL mode');
   pool = new Pool({ connectionString: conn, ssl: sslOpt(), max: 20 });
   await pool.query(PG_SCHEMA_DDL);
+  await pool.query(`ALTER TABLE permit_leads ADD COLUMN IF NOT EXISTS source_city TEXT NOT NULL DEFAULT 'San Diego'`).catch(() => {});
+  await pool.query(`ALTER TABLE permit_leads DROP CONSTRAINT IF EXISTS permit_leads_permit_number_key`).catch(() => {});
+  await pool.query(`DROP INDEX IF EXISTS permit_leads_permit_number_key`).catch(() => {});
+  await pool
+    .query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS permit_leads_permit_number_source_city_key ON permit_leads(permit_number, source_city)`
+    )
+    .catch(() => {});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_permit_leads_source_city ON permit_leads(source_city)`).catch(() => {});
+  await pool.query(`ALTER TABLE permit_leads DROP CONSTRAINT IF EXISTS permit_leads_status_check`).catch(() => {});
+  await pool
+    .query(
+      `ALTER TABLE permit_leads ADD CONSTRAINT permit_leads_status_check CHECK (status IN ('new','pursuing','contacted','responded','converted','not_interested','deleted'))`
+    )
+    .catch(() => {});
+  await pool
+    .query(`DELETE FROM permit_leads WHERE permit_type='Water Heater'`)
+    .then((r) => {
+      if (r?.rowCount) console.log(`[db] Removed ${r.rowCount} Water Heater permit_leads row(s) (retired permit type).`);
+    })
+    .catch(() => {});
   await pool
     .query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS responded_at TEXT`)
     .catch(() => {});
@@ -54,7 +75,13 @@ export async function initDatabase() {
     )
     .catch(() => {});
   await migrateSqliteToPostgres(pool);
-  for (const cat of ['restoration', 'property_mgmt', 'hoa', 'contractor']) {
+  await pool.query(`ALTER TABLE agent_learning DROP CONSTRAINT IF EXISTS agent_learning_category_check`).catch(() => {});
+  await pool
+    .query(
+      `ALTER TABLE agent_learning ADD CONSTRAINT agent_learning_category_check CHECK (category IN ('restoration','property_mgmt','hoa','contractor','permit_leads'))`
+    )
+    .catch(() => {});
+  for (const cat of ['restoration', 'property_mgmt', 'hoa', 'contractor', 'permit_leads']) {
     await q(`INSERT INTO agent_learning (category) VALUES ($1) ON CONFLICT (category) DO NOTHING`, [cat]);
   }
   const SEED_AT = '2020-06-01 08:00:00';
@@ -202,7 +229,7 @@ async function refreshAgentLearningForCategory(category) {
   );
 }
 
-export async function listVendors({ category, status } = {}) {
+export async function listVendors({ category, status, newThisMonth, blocked } = {}) {
   let sql = 'SELECT * FROM vendors WHERE true';
   const params = [];
   if (category) {
@@ -213,12 +240,34 @@ export async function listVendors({ category, status } = {}) {
     sql += ' AND status = ?';
     params.push(status);
   }
+  if (newThisMonth) {
+    sql += ` AND substring(COALESCE(created_at, ''), 1, 7) = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM')`;
+  }
+  if (blocked) {
+    sql += ` AND status IN ('not_sent','new') AND (
+        TRIM(COALESCE(email,'')) = ''
+        OR TRIM(COALESCE(contact_person,'')) = ''
+        OR TRIM(COALESCE(phone,'')) = ''
+      )`;
+  }
   sql += ' ORDER BY LOWER(name)';
   return qAll(sql, params);
 }
 
 export async function getVendor(id) {
   return qGet('SELECT * FROM vendors WHERE id = ?', [id]);
+}
+
+export async function deleteVendor(id) {
+  const prev = await getVendor(id);
+  if (!prev) return null;
+  await q('DELETE FROM vendors WHERE id = ?', [id]);
+  try {
+    await refreshAgentLearningForCategory(prev.category);
+  } catch {
+    /* ignore */
+  }
+  return prev;
 }
 
 export async function getAgentLearningForCategory(category) {
@@ -801,6 +850,35 @@ export async function getAgentReportSummary() {
   };
 }
 
+/** Sent outreach / follow-ups (email_drafts status sent) plus vendors marked sent with no draft row. */
+export async function listSentEmailsForReport(limit = 500) {
+  const lim = Math.min(Math.max(Number(limit) || 500, 1), 1000);
+  return qAll(
+    `SELECT u.company_name, u.date_sent, u.subject, u.vendor_id FROM (
+      SELECT v.name AS company_name,
+        COALESCE(NULLIF(TRIM(d.sent_at), ''), NULLIF(TRIM(v.date_sent), '')) AS date_sent,
+        COALESCE(NULLIF(TRIM(d.subject), ''), '—') AS subject,
+        v.id AS vendor_id
+      FROM email_drafts d
+      INNER JOIN vendors v ON v.id = d.vendor_id
+      WHERE d.status = 'sent' AND d.vendor_id IS NOT NULL
+      UNION ALL
+      SELECT v.name AS company_name,
+        TRIM(COALESCE(v.date_sent, '')) AS date_sent,
+        '—' AS subject,
+        v.id AS vendor_id
+      FROM vendors v
+      WHERE v.date_sent IS NOT NULL AND TRIM(COALESCE(v.date_sent, '')) <> ''
+        AND NOT EXISTS (
+          SELECT 1 FROM email_drafts d2 WHERE d2.vendor_id = v.id AND d2.status = 'sent'
+        )
+    ) u
+    ORDER BY u.date_sent DESC NULLS LAST
+    LIMIT ?`,
+    [lim]
+  );
+}
+
 function addCalendarDayYmdPg(dayYmd, deltaDays) {
   const d = new Date(`${dayYmd}T12:00:00`);
   d.setDate(d.getDate() + deltaDays);
@@ -1254,4 +1332,303 @@ export async function rejectPendingNewProspect(id) {
   if (!row || row.status !== 'pending') return { error: 'Not found or already reviewed' };
   await setPendingNewProspectStatus(id, 'rejected');
   return { ok: true };
+}
+
+export async function listPermitLeads({ permit_type, city, source_city, status, minScore, search, view } = {}) {
+  let sql = `SELECT * FROM permit_leads WHERE true`;
+  const params = [];
+  if (permit_type) {
+    sql += ` AND permit_type = ?`;
+    params.push(permit_type);
+  }
+  if (source_city) {
+    sql += ` AND lower(source_city) = lower(?)`;
+    params.push(source_city);
+  }
+  if (city) {
+    sql += ` AND lower(city) = lower(?)`;
+    params.push(city);
+  }
+  if (status) {
+    sql += ` AND status = ?`;
+    params.push(status);
+  } else {
+    const v = String(view || 'pipeline').toLowerCase();
+    if (v === 'pursue') sql += ` AND status IN ('pursuing','contacted','responded','converted')`;
+    else if (v === 'pass') sql += ` AND status = 'not_interested'`;
+    else if (v === 'deleted') sql += ` AND status = 'deleted'`;
+    else if (v === 'all') {
+      /* no status restriction */
+    } else sql += ` AND status NOT IN ('not_interested','deleted')`;
+  }
+  if (Number.isFinite(Number(minScore))) {
+    sql += ` AND lead_score >= ?`;
+    params.push(Number(minScore));
+  }
+  if (search) {
+    sql += ` AND lower(contractor_name) LIKE ?`;
+    params.push(`%${String(search).toLowerCase()}%`);
+  }
+  sql += ` ORDER BY lead_score DESC, date_submitted DESC, id DESC`;
+  return qAll(sql, params);
+}
+
+export async function getPermitLead(id) {
+  return qGet(`SELECT * FROM permit_leads WHERE id = ?`, [id]);
+}
+
+export async function getPermitLeadByPermitNumber(permitNumber) {
+  return qGet(`SELECT * FROM permit_leads WHERE permit_number = ? ORDER BY id DESC LIMIT 1`, [
+    String(permitNumber || '').trim(),
+  ]);
+}
+
+export async function getPermitLeadBySourceAndPermitNumber(permitNumber, sourceCity) {
+  return qGet(`SELECT * FROM permit_leads WHERE permit_number = ? AND lower(source_city) = lower(?)`, [
+    String(permitNumber || '').trim(),
+    String(sourceCity || 'San Diego').trim(),
+  ]);
+}
+
+export async function insertPermitLead(row) {
+  const { rows } = await q(
+    `INSERT INTO permit_leads (
+      permit_number, source_city, permit_type, address, city, zip_code, contractor_name, contractor_license,
+      contractor_phone, contractor_email, architect_name, project_value, date_submitted, status,
+      lead_score, notes, email_draft, sms_sent, created_at
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
+    ) RETURNING id`,
+    [
+      String(row.permit_number || '').trim(),
+      String(row.source_city || 'San Diego').trim() || 'San Diego',
+      row.permit_type,
+      row.address || '',
+      row.city || '',
+      row.zip_code || '',
+      row.contractor_name || '',
+      row.contractor_license || '',
+      row.contractor_phone || '',
+      row.contractor_email || '',
+      row.architect_name || '',
+      Number(row.project_value || 0),
+      row.date_submitted || '',
+      row.status || 'new',
+      Math.max(1, Math.min(10, Number(row.lead_score || 1))),
+      row.notes || '',
+      row.email_draft || '',
+      row.sms_sent ? 1 : 0,
+    ]
+  );
+  return getPermitLead(rows[0].id);
+}
+
+export async function updatePermitLead(id, patch) {
+  const allowed = [
+    'status',
+    'notes',
+    'contractor_phone',
+    'contractor_email',
+    'email_draft',
+    'lead_score',
+    'sms_sent',
+    'contractor_name',
+    'contractor_license',
+    'architect_name',
+    'project_value',
+    'source_city',
+  ];
+  const sets = [];
+  const vals = [];
+  for (const key of allowed) {
+    if (patch[key] !== undefined) {
+      sets.push(`${key} = ?`);
+      if (key === 'sms_sent') vals.push(patch[key] ? 1 : 0);
+      else if (key === 'lead_score') vals.push(Math.max(1, Math.min(10, Number(patch[key] || 1))));
+      else vals.push(patch[key]);
+    }
+  }
+  if (!sets.length) return getPermitLead(id);
+  vals.push(id);
+  await q(`UPDATE permit_leads SET ${sets.join(', ')} WHERE id = ?`, vals);
+  return getPermitLead(id);
+}
+
+export async function listPermitAgentRuns(limit = 30) {
+  const lim = Math.min(Math.max(Number(limit) || 30, 1), 200);
+  return qAll(`SELECT * FROM permit_agent_runs ORDER BY id DESC LIMIT ?`, [lim]);
+}
+
+export async function insertPermitAgentRun({
+  run_date,
+  permits_found = 0,
+  new_leads_added = 0,
+  leads_contacted = 0,
+  summary = '',
+}) {
+  const { rows } = await q(
+    `INSERT INTO permit_agent_runs (run_date, permits_found, new_leads_added, leads_contacted, summary, created_at)
+     VALUES (?, ?, ?, ?, ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')) RETURNING id`,
+    [run_date, Number(permits_found || 0), Number(new_leads_added || 0), Number(leads_contacted || 0), summary || '']
+  );
+  return qGet(`SELECT * FROM permit_agent_runs WHERE id = ?`, [rows[0].id]);
+}
+
+export async function insertCustomerLead(row) {
+  const { rows } = await q(
+    `INSERT INTO customer_leads (
+      name, phone, email, service_type, description, zipcode,
+      ai_estimate, estimated_range, urgency_level, photos_count, call_time_preference, status, created_at
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+      to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
+    ) RETURNING id`,
+    [
+      String(row.name || '').trim(),
+      String(row.phone || '').trim(),
+      String(row.email || '').trim(),
+      String(row.service_type || '').trim(),
+      String(row.description || '').trim(),
+      String(row.zipcode || '').trim(),
+      String(row.ai_estimate || '').trim(),
+      String(row.estimated_range || '').trim(),
+      String(row.urgency_level || '').trim(),
+      Math.max(0, Math.min(10, Number(row.photos_count) || 0)),
+      String(row.call_time_preference || '').trim(),
+      String(row.status || 'new').trim() || 'new',
+    ]
+  );
+  return qGet(`SELECT * FROM customer_leads WHERE id = ?`, [rows[0].id]);
+}
+
+export async function getPermitLeadStats() {
+  const today = new Date().toISOString().slice(0, 10);
+  const month = today.slice(0, 7);
+  const newToday = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE substring(created_at,1,10)=? AND status='new'`, [today]))?.n || 0;
+  const activeTotal = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status IN ('new','pursuing','contacted','responded')`))?.n || 0;
+  const contactedMonth = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status='contacted' AND substring(created_at,1,7)=?`, [month]))?.n || 0;
+  const converted = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status='converted'`))?.n || 0;
+  const newBadge = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status='new'`))?.n || 0;
+  const pipelineCount =
+    (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status NOT IN ('not_interested','deleted')`))?.n || 0;
+  const pursueCount =
+    (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status IN ('pursuing','contacted','responded','converted')`))?.n || 0;
+  const passCount = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status='not_interested'`))?.n || 0;
+  const deletedCount = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status='deleted'`))?.n || 0;
+  return {
+    newToday,
+    activeTotal,
+    contactedMonth,
+    converted,
+    newBadge,
+    pipelineCount,
+    pursueCount,
+    passCount,
+    deletedCount,
+  };
+}
+
+export async function updatePermitLearningSnapshot() {
+  const touched = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status IN ('contacted','responded','converted')`))?.n || 0;
+  const responded = (await qGet(`SELECT COUNT(*)::int AS n FROM permit_leads WHERE status IN ('responded','converted')`))?.n || 0;
+  const rate = touched > 0 ? Math.round((responded / touched) * 1000) / 1000 : 0;
+  await q(
+    `INSERT INTO agent_learning (category, response_rate, sent_count, responded_count, updated_at)
+     VALUES ('permit_leads', ?, ?, ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+     ON CONFLICT (category) DO UPDATE SET
+       response_rate = EXCLUDED.response_rate,
+       sent_count = EXCLUDED.sent_count,
+       responded_count = EXCLUDED.responded_count,
+       updated_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`,
+    [rate, touched, responded]
+  );
+}
+
+export async function wasSmsSentToday(alertType, eventKey = '', today = new Date().toISOString().slice(0, 10)) {
+  const row = await qGet(
+    `SELECT last_sms_sent FROM sms_alert_state WHERE alert_type = ? AND event_key = ?`,
+    [String(alertType || ''), String(eventKey || '')]
+  );
+  return String(row?.last_sms_sent || '') === today;
+}
+
+export async function markSmsSent(alertType, eventKey = '', today = new Date().toISOString().slice(0, 10)) {
+  await q(
+    `INSERT INTO sms_alert_state (alert_type, event_key, last_sms_sent)
+     VALUES (?, ?, ?)
+     ON CONFLICT (alert_type, event_key) DO UPDATE SET last_sms_sent = EXCLUDED.last_sms_sent`,
+    [String(alertType || ''), String(eventKey || ''), today]
+  );
+}
+
+export async function insertEmailDraftRecord({
+  vendor_id = null,
+  suggested_company_id = null,
+  subject = '',
+  body = '',
+  status = 'sent',
+  draft_type = 'permit_outreach',
+}) {
+  const { rows } = await q(
+    `INSERT INTO email_drafts (
+      vendor_id, suggested_company_id, subject, body, status, draft_type, created_at, sent_at
+    ) VALUES (?, ?, ?, ?, ?, ?, to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+      CASE WHEN ? = 'sent' THEN to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') ELSE NULL END
+    ) RETURNING id`,
+    [vendor_id, suggested_company_id, subject, body, status, draft_type, status]
+  );
+  return qGet(`SELECT * FROM email_drafts WHERE id = ?`, [rows[0].id]);
+}
+
+export async function getPermitAgentReportStats() {
+  const today = new Date().toISOString().slice(0, 10);
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  const newPermitLeadsToday =
+    (
+      await qGet(
+        `SELECT COUNT(*)::int AS n FROM permit_leads WHERE substring(created_at,1,10) = ?`,
+        [today]
+      )
+    )?.n || 0;
+  const hotLeadsThisWeek =
+    (
+      await qGet(
+        `SELECT COUNT(*)::int AS n FROM permit_leads WHERE lead_score >= 8 AND date_submitted >= ?`,
+        [weekAgo]
+      )
+    )?.n || 0;
+  const rows =
+    (await qAll(
+      `SELECT source_city, COUNT(*)::int AS cnt, COALESCE(SUM(lead_score),0)::int AS heat
+       FROM permit_leads
+       WHERE substring(created_at,1,10) >= ?
+       GROUP BY source_city`,
+      [weekAgo]
+    )) || [];
+  const permitLeadsBySourceCityWeek = rows
+    .map((r) => ({ source_city: r.source_city, count: r.cnt, heat: r.heat }))
+    .sort((a, b) => (b.heat - a.heat) || (b.count - a.count));
+  const top = permitLeadsBySourceCityWeek[0];
+  const hottestSourceCityThisWeek = top
+    ? { source_city: top.source_city, count: top.count, heat: top.heat }
+    : null;
+  const { CITIES_MONITORED_COUNT } = await import('./permitSourceRegistry.js');
+  return {
+    newPermitLeadsToday,
+    hotLeadsThisWeek,
+    permitLeadsBySourceCityWeek,
+    hottestSourceCityThisWeek,
+    citiesMonitored: CITIES_MONITORED_COUNT,
+  };
+}
+
+export async function listHotPermitLeads(limit = 3) {
+  const lim = Math.min(Math.max(Number(limit) || 3, 1), 25);
+  return qAll(
+    `SELECT * FROM permit_leads
+     WHERE lead_score >= 8
+     ORDER BY lead_score DESC, date_submitted DESC, id DESC
+     LIMIT ?`,
+    [lim]
+  );
 }

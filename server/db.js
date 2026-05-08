@@ -27,6 +27,7 @@ async function callDb(fn, ...args) {
 
 export const listVendors = (...a) => callDb('listVendors', ...a);
 export const getVendor = (...a) => callDb('getVendor', ...a);
+export const deleteVendor = (...a) => callDb('deleteVendor', ...a);
 export const getAgentLearningForCategory = (...a) => callDb('getAgentLearningForCategory', ...a);
 export const logAgentActivity = (...a) => callDb('logAgentActivity', ...a);
 export const listAgentActivity = (...a) => callDb('listAgentActivity', ...a);
@@ -67,6 +68,7 @@ export const listBlockedVendorIdsForAgent = (...a) => callDb('listBlockedVendorI
 export const listBlockedCompaniesForReport = (...a) => callDb('listBlockedCompaniesForReport', ...a);
 export const listOpenIssuesForReport = (...a) => callDb('listOpenIssuesForReport', ...a);
 export const getAgentReportSummary = (...a) => callDb('getAgentReportSummary', ...a);
+export const listSentEmailsForReport = (...a) => callDb('listSentEmailsForReport', ...a);
 export const getReviewDashboard = (...a) => callDb('getReviewDashboard', ...a);
 export const upsertVendorOutreachDraft = (...a) => callDb('upsertVendorOutreachDraft', ...a);
 export const finalizeEmailDraftSent = (...a) => callDb('finalizeEmailDraftSent', ...a);
@@ -84,3 +86,19 @@ export const approvePendingVendorFieldUpdate = (...a) => callDb('approvePendingV
 export const rejectPendingVendorFieldUpdate = (...a) => callDb('rejectPendingVendorFieldUpdate', ...a);
 export const approvePendingNewProspect = (...a) => callDb('approvePendingNewProspect', ...a);
 export const rejectPendingNewProspect = (...a) => callDb('rejectPendingNewProspect', ...a);
+export const listPermitLeads = (...a) => callDb('listPermitLeads', ...a);
+export const getPermitLead = (...a) => callDb('getPermitLead', ...a);
+export const getPermitLeadByPermitNumber = (...a) => callDb('getPermitLeadByPermitNumber', ...a);
+export const getPermitLeadBySourceAndPermitNumber = (...a) => callDb('getPermitLeadBySourceAndPermitNumber', ...a);
+export const insertPermitLead = (...a) => callDb('insertPermitLead', ...a);
+export const updatePermitLead = (...a) => callDb('updatePermitLead', ...a);
+export const listPermitAgentRuns = (...a) => callDb('listPermitAgentRuns', ...a);
+export const insertPermitAgentRun = (...a) => callDb('insertPermitAgentRun', ...a);
+export const getPermitLeadStats = (...a) => callDb('getPermitLeadStats', ...a);
+export const updatePermitLearningSnapshot = (...a) => callDb('updatePermitLearningSnapshot', ...a);
+export const wasSmsSentToday = (...a) => callDb('wasSmsSentToday', ...a);
+export const markSmsSent = (...a) => callDb('markSmsSent', ...a);
+export const insertEmailDraftRecord = (...a) => callDb('insertEmailDraftRecord', ...a);
+export const getPermitAgentReportStats = (...a) => callDb('getPermitAgentReportStats', ...a);
+export const listHotPermitLeads = (...a) => callDb('listHotPermitLeads', ...a);
+export const insertCustomerLead = (...a) => callDb('insertCustomerLead', ...a);

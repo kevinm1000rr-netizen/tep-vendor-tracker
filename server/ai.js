@@ -281,6 +281,79 @@ If your advice mentions how Tri Express shows up for partners, availability is o
   return complete(system, user);
 }
 
+export async function scorePermitLead(input) {
+  const permitType = String(input?.permit_type || '').trim();
+  const contractorName = String(input?.contractor_name || '').trim();
+  const city = String(input?.city || '').trim();
+  const sourceCity = String(input?.source_city || '').trim();
+  const value = Number(input?.project_value || 0);
+  const system = `${MODEL_PROMPT_PREFIX}You score permit-based B2B plumbing leads for Tri Express on a 1-10 integer scale.
+Base weighting:
+- ADU: 10
+- New Construction: 9
+- Remodel/Addition: 7
+Apply +1 location bonus if site city is Carlsbad, Chula Vista, Coronado, Del Mar, Encinitas, Imperial Beach, La Jolla, Mission Beach, Mission Valley, National City, Pacific Beach, Point Loma, or Solana Beach.
+Apply +2 premium-market bonus (coastal / high-value service area) if jurisdiction or site city is Coronado, Del Mar, Solana Beach, La Jolla, or Poway (cap total implied bonus in your head at +3 vs baseline).
+Adjust by +/-1 based on project value, permit specificity, and commercial likelihood, but keep in 1..10.
+Return strict JSON only: {"lead_score": number, "reason": string}`;
+  const user = `Lead input:
+${JSON.stringify({ permitType, contractorName, city, sourceCity, value }, null, 2)}`;
+  try {
+    const out = parseJsonLoose(await complete(system, user));
+    const n = Math.max(1, Math.min(10, Math.round(Number(out?.lead_score) || 0)));
+    if (n) return { lead_score: n, reason: String(out?.reason || '').slice(0, 220) };
+  } catch {
+    /* fallback below */
+  }
+  const baseMap = { ADU: 10, 'New Construction': 9, Remodel: 7, Addition: 7 };
+  const base = baseMap[permitType] ?? 6;
+  let score = base;
+  if (value >= 500000) score += 1;
+  if (value > 0 && value <= 5000) score -= 1;
+  const site = `${String(city || '').toLowerCase()} ${String(sourceCity || '').toLowerCase()}`;
+  const premium = ['coronado', 'del mar', 'solana beach', 'la jolla', 'poway'];
+  if (premium.some((p) => site.includes(p))) score += 2;
+  score = Math.max(1, Math.min(10, score));
+  return { lead_score: score, reason: 'Heuristic fallback score' };
+}
+
+export async function generatePermitOutreachEmail(lead) {
+  const system = `${MODEL_PROMPT_PREFIX}Write a personalized contractor outreach email for Tri Express Plumbing based on a newly filed permit.
+Keep under 220 words. Include subject line as first line in format "Subject: ...".
+Mention permit type, city, and collaboration angle. No fake claims.
+Must mention: 17 years experience, CA Lic #926629, same-day response, and a 12-year relationship with Integrity Restoration.
+Service mapping by permit type:
+- ADU/JADU: water heater installation, rough-in plumbing
+- New Construction: full plumbing installation, repiping
+- Remodel/Addition: repiping, fixture installation, water heaters
+Sign as "Kevin | Tri Express Plumbing".
+Include ${OUTREACH_FULL_NAME}, ${OUTREACH_PHONE}, ${OUTREACH_EMAIL_ADDR}; final line exactly ${OUTREACH_EMAIL_SIGNATURE_LINE}.`;
+  const user = `Lead:
+${JSON.stringify(
+    {
+      permit_number: lead.permit_number,
+      permit_type: lead.permit_type,
+      contractor_name: lead.contractor_name,
+      city: lead.city,
+      address: lead.address,
+      project_value: lead.project_value,
+      date_submitted: lead.date_submitted,
+    },
+    null,
+    2
+  )}`;
+  const text = await complete(system, user);
+  return ensureAgentEmailDraftHasContact(text || '');
+}
+
+export async function generatePermitCallScript(lead) {
+  const system = `${MODEL_PROMPT_PREFIX}Create a concise phone call script for Tri Express calling a contractor about a recent permit.
+Output short sections: opener, value bullets, objection handling, close.`;
+  const user = `Lead:
+${JSON.stringify(lead, null, 2)}`;
+  return complete(system, user);
+}
+
 function categoryHuman(c) {
   const m = {
     restoration: 'Restoration / emergency rebuild',

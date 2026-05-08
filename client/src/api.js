@@ -1,6 +1,14 @@
-/** Default backend (Railway production). Override with `VITE_API_BASE_URL` in `.env.local` for local API, e.g. `http://127.0.0.1:3099/api`. */
-const DEFAULT_API_BASE = 'https://tep-vendor-tracker-production.up.railway.app/api';
-const BASE = String(import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE)
+/** Default API base: local dev uses Vite proxy / separate API port; production uses same origin. */
+function defaultApiBase() {
+  if (typeof window === 'undefined') return '/api';
+  const h = window.location.hostname;
+  if (/^(localhost|127\.0\.0\.1)$/i.test(h)) {
+    return 'http://127.0.0.1:3099/api';
+  }
+  return `${window.location.origin}/api`;
+}
+
+const BASE = String(import.meta.env.VITE_API_BASE_URL || defaultApiBase())
   .trim()
   .replace(/\/+$/, '');
 
@@ -30,6 +38,7 @@ export const api = {
   vendor: (id) => req(`/vendors/${id}`),
   patchVendor: (id, body) =>
     req(`/vendors/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteVendor: (id) => req(`/vendors/${id}`, { method: 'DELETE' }),
   importVendorsPreview: (csv) =>
     req('/vendors/import-preview', { method: 'POST', body: JSON.stringify({ csv }) }),
   importVendorsCommit: (csv) =>
@@ -95,12 +104,45 @@ export const api = {
     return req(`/agent/email-drafts${s ? `?${s}` : ''}`);
   },
   agentReport: () => req('/agent/report'),
+  listSentEmailsForReport: (limit) => {
+    const qs = new URLSearchParams();
+    if (limit != null && Number.isFinite(Number(limit))) qs.set('limit', String(limit));
+    const s = qs.toString();
+    return req(`/agent/sent-emails${s ? `?${s}` : ''}`);
+  },
   agentActivity: (limit) => req(`/agent/activity${limit ? `?limit=${limit}` : ''}`),
   sendEmail: (body) => req('/email/send', { method: 'POST', body: JSON.stringify(body) }),
   sendFollowupEmail: (body) => req('/email/send-followup', { method: 'POST', body: JSON.stringify(body) }),
   testSmtp: () => req('/email/test', { method: 'POST', body: '{}' }),
+  testSms: () => req('/sms/test', { method: 'POST', body: '{}' }),
+  permitLeads: (q = {}) => {
+    const qs = new URLSearchParams();
+    if (q.permit_type) qs.set('permit_type', q.permit_type);
+    if (q.city) qs.set('city', q.city);
+    if (q.source_city) qs.set('source_city', q.source_city);
+    if (q.status) qs.set('status', q.status);
+    if (q.view) qs.set('view', q.view);
+    if (q.minScore != null) qs.set('minScore', String(q.minScore));
+    if (q.search) qs.set('search', q.search);
+    const s = qs.toString();
+    return req(`/permits/leads${s ? `?${s}` : ''}`);
+  },
+  permitSources: () => req('/permits/sources'),
+  permitLead: (id) => req(`/permits/leads/${id}`),
+  patchPermitLead: (id, body) => req(`/permits/leads/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  permitRunNow: () => req('/permits/run-now', { method: 'POST' }),
+  permitRuns: (limit) => req(`/permits/runs${limit ? `?limit=${limit}` : ''}`),
+  sendPermitLeadEmail: (id, body = {}) =>
+    req(`/permits/leads/${id}/send-email`, { method: 'POST', body: JSON.stringify(body) }),
+  regeneratePermitLeadEmail: (id) =>
+    req(`/permits/leads/${id}/regenerate-email`, { method: 'POST', body: '{}' }),
+  permitLeadCallScript: (id) => req(`/permits/leads/${id}/call-script`, { method: 'POST', body: '{}' }),
 };
 
 export function downloadCsv() {
   window.open(`${BASE}/export/csv`, '_blank');
+}
+
+export function downloadPermitCsv() {
+  window.open(`${BASE}/permits/export/csv`, '_blank');
 }

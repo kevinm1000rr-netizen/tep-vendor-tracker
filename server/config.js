@@ -74,7 +74,7 @@ export function saveApiKey(key) {
   writeFileConfig(data);
 }
 
-/** Env wins over `.tep-config.json` */
+/** Env wins over `.tep-config.json`. Discovery uses Text Search + Details with this key (`GOOGLE_PLACES_API_KEY`). */
 export function getGooglePlacesApiKey() {
   const fromEnv = (process.env.GOOGLE_PLACES_API_KEY || '').trim();
   if (fromEnv) return fromEnv;
@@ -115,7 +115,7 @@ export function getModel() {
     process.env.ANTHROPIC_MODEL?.trim() ||
     file.anthropicModel?.trim() ||
     file.ANTHROPIC_MODEL?.trim() ||
-    'claude-sonnet-4-6'
+    'claude-sonnet-4-5'
   );
 }
 
@@ -230,4 +230,96 @@ export function saveSmtpSettings({ smtpHost, smtpPort, smtpUser, smtpPass, smtpF
     else delete data.smtpFromEmail;
   }
   writeFileConfig(data);
+}
+
+function pickTwilioSidFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  return String(file.twilioSid ?? file.TWILIO_ACCOUNT_SID ?? '').trim();
+}
+
+function pickTwilioTokenFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  return String(file.twilioAuthToken ?? file.TWILIO_AUTH_TOKEN ?? '').trim();
+}
+
+function pickTwilioFromPhoneFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  return String(file.twilioFromPhone ?? file.TWILIO_FROM_PHONE ?? '').trim();
+}
+
+function pickAlertPhoneFromFile(file) {
+  if (!file || typeof file !== 'object') return '';
+  return String(file.alertPhone ?? file.ALERT_PHONE ?? '').trim();
+}
+
+export function getTwilioAccountSid() {
+  const fromEnv = (process.env.TWILIO_ACCOUNT_SID || '').trim();
+  if (fromEnv) return fromEnv;
+  return pickTwilioSidFromFile(readFileConfig());
+}
+
+export function getTwilioAuthToken() {
+  const fromEnv = (process.env.TWILIO_AUTH_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  return pickTwilioTokenFromFile(readFileConfig());
+}
+
+export function getTwilioFromPhone() {
+  const fromEnv = (process.env.TWILIO_FROM_NUMBER || process.env.TWILIO_FROM_PHONE || '').trim();
+  if (fromEnv) return fromEnv;
+  return pickTwilioFromPhoneFromFile(readFileConfig());
+}
+
+export function getTwilioFromNumber() {
+  return getTwilioFromPhone();
+}
+
+/**
+ * Twilio Messaging Service SID (starts with `MG…`). Required when sending from a 10DLC
+ * pool or while A2P registration is still pending — Twilio will use the service's sender
+ * pool instead of a single FROM number, which avoids error 30034 (unregistered number).
+ */
+export function getTwilioMessagingServiceSid() {
+  const fromEnv = (process.env.TWILIO_MESSAGING_SERVICE_SID || '').trim();
+  if (fromEnv) return fromEnv;
+  const cfg = readFileConfig();
+  return (cfg.twilioMessagingServiceSid || '').trim();
+}
+
+export function getAlertPhone() {
+  const fromEnv = (process.env.ALERT_PHONE || '').trim();
+  if (fromEnv) return fromEnv;
+  return pickAlertPhoneFromFile(readFileConfig());
+}
+
+/** Accela Construct API (developer.accela.com) — OAuth client credentials, shared across agencies the app is provisioned for. */
+export function getAccelaClientId() {
+  return (process.env.ACCELA_CLIENT_ID || readFileConfig().accelaClientId || '').trim();
+}
+
+export function getAccelaClientSecret() {
+  return (process.env.ACCELA_CLIENT_SECRET || readFileConfig().accelaClientSecret || '').trim();
+}
+
+/** e.g. PRODUCTION or SUPPLIER (per Accela app registration). */
+export function getAccelaEnvironment() {
+  return (
+    process.env.ACCELA_ENVIRONMENT?.trim() ||
+    readFileConfig().accelaEnvironment?.trim() ||
+    'PRODUCTION'
+  );
+}
+
+export function isAccelaApiConfigured() {
+  return Boolean(getAccelaClientId() && getAccelaClientSecret());
+}
+
+/** SMS destination for AI estimate lead alerts (E.164). Defaults to Tri Express business line. */
+export function getEstimateSmsTo() {
+  return (process.env.ESTIMATE_SMS_TO || '+16198436692').trim();
+}
+
+/** CRM URL shown in owner notifications. Override with CRM_LEADS_URL (e.g. https://your-app.up.railway.app/permits). */
+export function getCrmLeadsUrl() {
+  return (process.env.CRM_LEADS_URL || 'http://localhost:5173/permits').trim();
 }

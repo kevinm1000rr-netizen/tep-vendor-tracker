@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Tri Express Plumbing — Vendor Outreach & Relationship Management",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "concurrently -k \"cross-env PORT=3099 node server/index.js\" \"vite\"",
     "build": "vite build",
@@ -13,13 +16,16 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "axios": "^1.16.0",
     "better-sqlite3": "^11.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "multer": "^2.0.2",
     "node-cron": "^4.2.1",
     "nodemailer": "^6.10.1",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "twilio": "^6.0.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.3",

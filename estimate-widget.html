@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5" />
+  <title>Free AI Plumbing Estimate | Tri Express Plumbing</title>
+  <meta name="description" content="Get a free AI-assisted plumbing estimate from Tri Express Plumbing — licensed San Diego plumbers." />
+  <style>
+    :root {
+      --navy: #1B2B4B;
+      --red: #DC2626;
+      --bg: #ffffff;
+      --muted: #64748b;
+      --radius: 14px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+      background: var(--bg);
+      color: var(--navy);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 520px; margin: 0 auto; padding: 1rem 1rem 2.5rem; }
+    .brand {
+      text-align: center;
+      padding: 1rem 0 0.5rem;
+    }
+    .brand h1 { font-size: 1.35rem; margin: 0 0 0.25rem; color: var(--navy); }
+    .brand p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .steps {
+      display: flex;
+      gap: 0.35rem;
+      margin: 1rem 0 1.25rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .steps span {
+      flex: 1;
+      text-align: center;
+      padding: 0.45rem 0.25rem;
+      border-radius: 8px;
+      background: #f1f5f9;
+      color: var(--muted);
+    }
+    .steps span.on { background: var(--navy); color: #fff; }
+    .trust {
+      display: grid;
+      gap: 0.35rem;
+      font-size: 0.82rem;
+      margin-bottom: 1rem;
+      color: var(--navy);
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: var(--radius);
+      padding: 1.1rem;
+      box-shadow: 0 8px 24px rgba(27, 43, 75, 0.06);
+    }
+    label { display: block; font-weight: 600; font-size: 0.85rem; margin: 0.75rem 0 0.3rem; }
+    input, select, textarea {
+      width: 100%;
+      padding: 0.75rem 0.85rem;
+      border: 2px solid #e2e8f0;
+      border-radius: 10px;
+      font-size: 1rem;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--navy);
+    }
+    textarea { min-height: 100px; resize: vertical; }
+    .btn-row { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 1rem; }
+    button, .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0.75rem 1rem;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 700;
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      text-align: center;
+    }
+    .btn-primary { background: var(--red); color: #fff; }
+    .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn-secondary { background: var(--navy); color: #fff; }
+    .btn-outline { background: #fff; color: var(--navy); border: 2px solid var(--navy); }
+    .err { color: var(--red); font-size: 0.9rem; margin-top: 0.5rem; }
+    .loader-wrap {
+      display: none;
+      text-align: center;
+      padding: 2rem 1rem;
+    }
+    .loader-wrap.on { display: block; }
+    .wrench {
+      width: 48px; height: 48px;
+      margin: 0 auto 1rem;
+      border: 4px solid #e2e8f0;
+      border-top-color: var(--red);
+      border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .estimate-card h2 { font-size: 1.1rem; margin: 0 0 0.75rem; }
+    .estimate-body {
+      white-space: pre-wrap;
+      font-size: 0.95rem;
+      color: #334155;
+      margin-bottom: 1rem;
+    }
+    .price-big {
+      font-size: 1.65rem;
+      font-weight: 800;
+      color: var(--navy);
+      margin: 0.5rem 0;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.35rem 0.75rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .badge.urgent { background: #fee2e2; color: #991b1b; }
+    .badge.calm { background: #dcfce7; color: #166534; }
+    .promise {
+      margin-top: 1rem;
+      padding: 0.85rem;
+      background: #eff6ff;
+      border-radius: 10px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--navy);
+    }
+    .photo-grid { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.35rem; }
+    .photo-grid img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid #e2e8f0; }
+    .hint { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
+    footer { text-align: center; margin-top: 2rem; font-size: 0.78rem; color: var(--muted); }
+    a { color: var(--red); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">
+      <h1>Tri Express Plumbing</h1>
+      <p>Free AI estimate — same honest pricing since 2008</p>
+    </div>
+    <div class="steps" id="steps">
+      <span class="on" data-s="1">1 · Your issue</span>
+      <span data-s="2">2 · Estimate</span>
+      <span data-s="3">3 · Confirm</span>
+    </div>
+    <div class="trust">
+      <span>⭐ 4.9 stars on Google</span>
+      <span>🔧 CA Lic #926629</span>
+      <span>📅 17 Years Experience</span>
+      <span>⚡ Same Day Service Available</span>
+    </div>
+
+    <div id="panel-step1" class="panel">
+      <form id="form1">
+        <label for="name">Full name *</label>
+        <input id="name" name="name" required autocomplete="name" />
+
+        <label for="phone">Phone *</label>
+        <input id="phone" name="phone" type="tel" required autocomplete="tel" />
+
+        <label for="email">Email *</label>
+        <input id="email" name="email" type="email" required autocomplete="email" />
+
+        <label for="service">Service type *</label>
+        <select id="service" name="service" required>
+          <option value="">Select…</option>
+          <option>Water Heater Repair/Replace</option>
+          <option>Leak Detection</option>
+          <option>Repiping</option>
+          <option>Drain Cleaning</option>
+          <option>Slab Leak</option>
+          <option>ADU Plumbing</option>
+          <option>Tankless Water Heater</option>
+          <option>Emergency Service</option>
+          <option>Other</option>
+        </select>
+
+        <label for="description">Describe your issue *</label>
+        <textarea id="description" name="description" required placeholder="What’s going on? Any noises, leaks, or when it started?"></textarea>
+
+        <label for="photos">Photos (optional, up to 3)</label>
+        <input id="photos" name="photos" type="file" accept="image/jpeg,image/png,image/heic,image/heif,.jpg,.jpeg,.png,.heic,.heif" multiple />
+        <p class="hint">JPG, PNG, or HEIC. HEIC may not be analyzed by AI — describe clearly if you use Apple photos.</p>
+        <div class="photo-grid" id="photoPreviews"></div>
+
+        <label for="zipcode">ZIP code *</label>
+        <input id="zipcode" name="zipcode" inputmode="numeric" maxlength="5" pattern="\d{5}" required placeholder="e.g. 91910" />
+        <p class="hint">San Diego County &amp; nearby service area.</p>
+
+        <div class="btn-row">
+          <button type="submit" class="btn-primary" id="btn-estimate">Get My Free Estimate</button>
+        </div>
+        <p class="err" id="err1" hidden></p>
+      </form>
+    </div>
+
+    <div id="panel-loading" class="panel loader-wrap">
+      <div class="wrench" aria-hidden="true"></div>
+      <p><strong>Our AI is analyzing your photos…</strong></p>
+      <p class="hint">Usually under 30 seconds. Hang tight!</p>
+    </div>
+
+    <div id="panel-step2" class="panel" hidden>
+      <div class="estimate-card">
+        <h2>Your instant estimate</h2>
+        <div id="urgency-wrap"></div>
+        <div class="price-big" id="price-range"></div>
+        <div class="estimate-body" id="estimate-text"></div>
+        <div class="promise" id="kevin-promise"></div>
+        <div class="btn-row" style="margin-top:1rem;">
+          <a class="btn btn-secondary" id="book-tel" href="tel:+16198436692">Call Now</a>
+          <button type="button" class="btn-primary" id="btn-confirm-flow">Book Appointment</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="panel-step3" class="panel" hidden>
+      <h2 style="margin-top:0;font-size:1.1rem;">Want a Tri Express technician to confirm your exact price?</h2>
+      <form id="form3">
+        <label for="cname">Name</label>
+        <input id="cname" name="cname" required />
+
+        <label for="cphone">Phone</label>
+        <input id="cphone" name="cphone" type="tel" required />
+
+        <label for="calltime">Best time to call *</label>
+        <select id="calltime" name="calltime" required>
+          <option value="morning">Morning (8am–12pm)</option>
+          <option value="afternoon">Afternoon (12pm–5pm)</option>
+          <option value="evening">Evening (5pm–7pm)</option>
+          <option value="asap">ASAP – Emergency</option>
+        </select>
+        <div class="btn-row">
+          <button type="submit" class="btn-primary" id="btn-final">Confirm My Appointment</button>
+        </div>
+        <p class="err" id="err3" hidden></p>
+      </form>
+    </div>
+
+    <div id="panel-done" class="panel" hidden>
+      <p id="done-msg" style="margin:0;font-size:1.05rem;"></p>
+    </div>
+
+    <footer>
+      Tri Express Plumbing · San Diego County · <a href="tel:+16198436692">(619) 843-6692</a><br />
+      Embed: add <code>?api=YOUR_API_BASE</code> if this file is not on the same host as the API (no trailing /api).
+    </footer>
+  </div>
+
+  <script>
+    function apiBase() {
+      const q = new URLSearchParams(location.search).get('api');
+      if (q) return q.replace(/\/$/, '');
+      if (location.hostname === '127.0.0.1' || location.hostname === 'localhost') {
+        if (location.port === '5173') return 'http://127.0.0.1:3099';
+      }
+      return '';
+    }
+    function esc(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+    function setStep(n) {
+      document.querySelectorAll('.steps span').forEach((el) => {
+        el.classList.toggle('on', el.dataset.s === String(n));
+      });
+    }
+    let savedFiles = [];
+    let lastEstimate = { text: '', range: '', urgency: '', rawJson: '' };
+
+    document.getElementById('photos').addEventListener('change', (e) => {
+      const files = Array.from(e.target.files || []).slice(0, 3);
+      savedFiles = files;
+      const prev = document.getElementById('photoPreviews');
+      prev.innerHTML = '';
+      files.forEach((f) => {
+        if (!f.type.startsWith('image/')) return;
+        const url = URL.createObjectURL(f);
+        const img = document.createElement('img');
+        img.src = url;
+        img.alt = f.name;
+        prev.appendChild(img);
+      });
+    });
+
+    document.getElementById('form1').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('err1');
+      err.hidden = true;
+      const base = apiBase();
+      const fd = new FormData();
+      fd.append('name', document.getElementById('name').value.trim());
+      fd.append('phone', document.getElementById('phone').value.trim());
+      fd.append('email', document.getElementById('email').value.trim());
+      fd.append('service', document.getElementById('service').value);
+      fd.append('description', document.getElementById('description').value.trim());
+      fd.append('zipcode', document.getElementById('zipcode').value.trim());
+      savedFiles.forEach((f) => fd.append('photos', f));
+
+      document.getElementById('panel-step1').hidden = true;
+      document.getElementById('panel-loading').classList.add('on');
+      document.getElementById('btn-estimate').disabled = true;
+
+      try {
+        const res = await fetch((base ? base : '') + '/api/estimate/analyze', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || res.statusText);
+        lastEstimate.text = data.estimateText || '';
+        lastEstimate.range = data.estimated_range || '';
+        lastEstimate.urgency = data.urgency_level || '';
+        lastEstimate.rawJson = JSON.stringify(data);
+
+        document.getElementById('estimate-text').textContent = lastEstimate.text;
+        document.getElementById('price-range').textContent = lastEstimate.range || 'See details below';
+        const uw = document.getElementById('urgency-wrap');
+        const u = (lastEstimate.urgency || '').toLowerCase();
+        let cls = 'badge';
+        let uText = lastEstimate.urgency || '—';
+        if (u.includes('emergency') || u.includes('immediately') || u.includes('call now')) {
+          cls += ' urgent';
+          uText = 'EMERGENCY — Call (619) 843-6692 now';
+        } else if (u.includes('urgent') || u.includes('24') || u.includes('48') || u.includes('soon')) {
+          uText = 'URGENT — within 24–48 hours';
+        } else if (u.includes('schedule') || u.includes('wait') || u.includes('week') || u.includes('plan')) {
+          cls += ' calm';
+          uText = 'SCHEDULE — within 1–2 weeks';
+        }
+        uw.innerHTML = '<span class="' + cls + '">' + esc(uText) + '</span>';
+        document.getElementById('kevin-promise').textContent =
+          'A Tri Express technician will call you within 1 hour to confirm your exact quote — our final price is usually 10-15% below this estimate!';
+
+        document.getElementById('panel-loading').classList.remove('on');
+        document.getElementById('panel-step2').hidden = false;
+        setStep(2);
+      } catch (x) {
+        document.getElementById('panel-loading').classList.remove('on');
+        document.getElementById('panel-step1').hidden = false;
+        document.getElementById('btn-estimate').disabled = false;
+        err.textContent = x.message || 'Something went wrong';
+        err.hidden = false;
+      }
+    });
+
+    document.getElementById('btn-confirm-flow').addEventListener('click', () => {
+      document.getElementById('panel-step2').hidden = true;
+      document.getElementById('panel-step3').hidden = false;
+      document.getElementById('cname').value = document.getElementById('name').value.trim();
+      document.getElementById('cphone').value = document.getElementById('phone').value.trim();
+      setStep(3);
+    });
+
+    document.getElementById('form3').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const err = document.getElementById('err3');
+      err.hidden = true;
+      const base = apiBase();
+      const fd = new FormData();
+      fd.append('name', document.getElementById('cname').value.trim());
+      fd.append('phone', document.getElementById('cphone').value.trim());
+      fd.append('email', document.getElementById('email').value.trim());
+      fd.append('service', document.getElementById('service').value);
+      fd.append('description', document.getElementById('description').value.trim());
+      fd.append('zipcode', document.getElementById('zipcode').value.trim());
+      fd.append('call_time_preference', document.getElementById('calltime').value);
+      fd.append('ai_estimate', lastEstimate.text);
+      savedFiles.forEach((f) => fd.append('photos', f));
+
+      const btn = document.getElementById('btn-final');
+      btn.disabled = true;
+      try {
+        const res = await fetch((base ? base : '') + '/api/estimate/submit', { method: 'POST', body: fd });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || res.statusText);
+        document.getElementById('panel-step3').hidden = true;
+        document.getElementById('panel-done').hidden = false;
+        document.getElementById('done-msg').textContent = data.message || 'Thank you!';
+        setStep(3);
+      } catch (x) {
+        err.textContent = x.message || 'Submit failed';
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

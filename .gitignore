@@ -1,8 +1,17 @@
 node_modules/
 dist/
+
+# Secrets and local config
+.env
+.env.local
+.tep-config.json
+
+# SQLite (local / default path)
 vendor_tracker.db
 vendor_tracker.db-shm
 vendor_tracker.db-wal
-.env
-.tep-config.json
+
+# OS / editor
 .DS_Store
+Thumbs.db
+*.log

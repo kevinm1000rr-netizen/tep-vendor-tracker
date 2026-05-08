@@ -11,8 +11,7 @@ function formatSummary(s) {
   } else if (s.newProspects != null) parts.push(`${s.newProspects} prospects`);
   if (s.outreachDraftsCreated != null) parts.push(`${s.outreachDraftsCreated} drafts`);
   if (s.skippedNoSearchKeys) parts.push('no search keys');
-  if (s.discoverySkippedNoSerpApi) parts.push('no SerpAPI');
-  if (s.skippedNoAiKeyForDiscovery) parts.push('no AI key for discovery');
+  if (s.discoverySkippedNoPlacesApi) parts.push('no Google Places key for discovery');
   return parts.join(' · ') || '—';
 }
 

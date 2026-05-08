@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS email_drafts (
 CREATE INDEX IF NOT EXISTS idx_email_drafts_suggested ON email_drafts(suggested_company_id);
 
 CREATE TABLE IF NOT EXISTS agent_learning (
-  category TEXT PRIMARY KEY CHECK (category IN ('restoration','property_mgmt','hoa','contractor')),
+  category TEXT PRIMARY KEY CHECK (category IN ('restoration','property_mgmt','hoa','contractor','permit_leads')),
   response_rate DOUBLE PRECISION NOT NULL DEFAULT 0,
   best_day_to_send TEXT NOT NULL DEFAULT '',
   best_subject_line TEXT NOT NULL DEFAULT '',
@@ -140,4 +140,68 @@ CREATE TABLE IF NOT EXISTS app_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS permit_leads (
+  id SERIAL PRIMARY KEY,
+  permit_number TEXT NOT NULL,
+  source_city TEXT NOT NULL DEFAULT 'San Diego',
+  permit_type TEXT NOT NULL CHECK (permit_type IN ('ADU','New Construction','Remodel','Water Heater','Addition')),
+  address TEXT NOT NULL DEFAULT '',
+  city TEXT NOT NULL DEFAULT '',
+  zip_code TEXT NOT NULL DEFAULT '',
+  contractor_name TEXT NOT NULL DEFAULT '',
+  contractor_license TEXT NOT NULL DEFAULT '',
+  contractor_phone TEXT NOT NULL DEFAULT '',
+  contractor_email TEXT NOT NULL DEFAULT '',
+  architect_name TEXT NOT NULL DEFAULT '',
+  project_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+  date_submitted TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','pursuing','contacted','responded','converted','not_interested','deleted')),
+  lead_score INTEGER NOT NULL DEFAULT 1,
+  notes TEXT NOT NULL DEFAULT '',
+  email_draft TEXT NOT NULL DEFAULT '',
+  sms_sent INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')),
+  UNIQUE(permit_number, source_city)
+);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_status ON permit_leads(status);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_date_submitted ON permit_leads(date_submitted);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_score ON permit_leads(lead_score);
+CREATE INDEX IF NOT EXISTS idx_permit_leads_source_city ON permit_leads(source_city);
+
+CREATE TABLE IF NOT EXISTS permit_agent_runs (
+  id SERIAL PRIMARY KEY,
+  run_date TEXT NOT NULL,
+  permits_found INTEGER NOT NULL DEFAULT 0,
+  new_leads_added INTEGER NOT NULL DEFAULT 0,
+  leads_contacted INTEGER NOT NULL DEFAULT 0,
+  summary TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+);
+
+CREATE TABLE IF NOT EXISTS sms_alert_state (
+  alert_type TEXT NOT NULL,
+  event_key TEXT NOT NULL DEFAULT '',
+  last_sms_sent TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (alert_type, event_key)
+);
+
+CREATE TABLE IF NOT EXISTS customer_leads (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  email TEXT NOT NULL,
+  service_type TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  zipcode TEXT NOT NULL DEFAULT '',
+  ai_estimate TEXT NOT NULL DEFAULT '',
+  estimated_range TEXT NOT NULL DEFAULT '',
+  urgency_level TEXT NOT NULL DEFAULT '',
+  photos_count INTEGER NOT NULL DEFAULT 0,
+  call_time_preference TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','called','booked','completed')),
+  created_at TEXT NOT NULL DEFAULT (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'))
+);
+CREATE INDEX IF NOT EXISTS idx_customer_leads_status ON customer_leads(status);
+CREATE INDEX IF NOT EXISTS idx_customer_leads_created ON customer_leads(created_at);
 `;
