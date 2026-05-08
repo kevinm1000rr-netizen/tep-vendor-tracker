@@ -6,6 +6,7 @@ import { SEED_VENDORS } from './seed.js';
 import { VENDOR_TENURE_QUALIFICATION_SHORT } from './qualification.js';
 import { ensureAgentEmailDraftHasContact } from './ai.js';
 import { CITIES_MONITORED_COUNT } from './permitSourceRegistry.js';
+import { getPermitLeadMinScore } from './config.js';
 
 let db;
 
@@ -80,6 +81,7 @@ export function initDatabase() {
   ensurePermitLeadsSourceCityIndex();
   migratePermitLeadStatusExpand();
   purgeWaterHeaterPermitLeads();
+  purgeLowScorePermitLeads();
   migrateCustomerLeadsTable();
   migrateAgentLearningPermitCategorySqlite();
   migrateInflatedNewThisMonthOnce();
@@ -1121,6 +1123,24 @@ function migrateCustomerLeadsTable() {
     CREATE INDEX IF NOT EXISTS idx_customer_leads_status ON customer_leads(status);
     CREATE INDEX IF NOT EXISTS idx_customer_leads_created ON customer_leads(created_at);
   `);
+}
+
+/**
+ * Drop any pre-existing permit_leads rows below the configured minimum score.
+ * Keeps the pipeline focused on high-quality leads (default 7+/10).
+ */
+function purgeLowScorePermitLeads() {
+  const t = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='permit_leads'`).get();
+  if (!t) return;
+  try {
+    const minScore = getPermitLeadMinScore();
+    const info = db.prepare(`DELETE FROM permit_leads WHERE lead_score < ?`).run(minScore);
+    if (info?.changes) {
+      console.log(`[db] Removed ${info.changes} permit_leads row(s) with score < ${minScore}/10.`);
+    }
+  } catch (e) {
+    console.warn('[db] purge low-score permit_leads skipped:', e?.message || e);
+  }
 }
 
 /** Drop any pre-existing Water Heater rows; permit type was retired (already covered by other plumbers). */

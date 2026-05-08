@@ -13,7 +13,7 @@ import {
   generatePermitCallScript,
   scorePermitLead,
 } from './ai.js';
-import { getSerpApiKey } from './config.js';
+import { getSerpApiKey, getPermitLeadMinScore } from './config.js';
 import { sendSMS } from './sms.js';
 import { CITIES_MONITORED_COUNT } from './permitSourceRegistry.js';
 import { collectPermitLeadsForRun } from './permitCityFeeds.js';
@@ -125,7 +125,7 @@ function buildSmsDigestLines(addedRows) {
   return lines.join('\n');
 }
 
-function buildRunSummary({ scannedTotal, scannedBySource, added, addedRows, contacted }) {
+function buildRunSummary({ scannedTotal, scannedBySource, added, addedRows, contacted, skippedLowScore = 0, minScore }) {
   const byType = new Map();
   for (const r of addedRows) {
     const k = `${r.source_city || '?'}\t${r.permit_type || '?'}`;
@@ -141,8 +141,11 @@ function buildRunSummary({ scannedTotal, scannedBySource, added, addedRows, cont
   const src = `By source: ${Object.entries(scannedBySource)
     .map(([s, c]) => `${s}:${c}`)
     .join(', ')}.`;
+  const skipLine = skippedLowScore
+    ? ` Skipped ${skippedLowScore} below score ${minScore}/10.`
+    : '';
   const tail = typeLines ? ` New by source/type: ${typeLines}.` : '';
-  return `${head}\n${src}${tail}`;
+  return `${head}\n${src}${skipLine}${tail}`;
 }
 
 async function enrichContactWithSerp(lead, serpKey) {
@@ -179,8 +182,10 @@ export async function runPermitAgent() {
     }
     const permits = await collectPermitLeadsForRun();
     const scannedBySource = aggregateScannedBySource(permits);
+    const minScore = getPermitLeadMinScore();
     let added = 0;
     let contacted = 0;
+    let skippedLowScore = 0;
     let topLead = null;
     const addedRows = [];
     for (const p0 of permits) {
@@ -191,6 +196,11 @@ export async function runPermitAgent() {
         1,
         Math.min(10, Number(lead_score || 5) + locationBonus(p1) + premiumMarketBonus(p1))
       );
+      // Skip low-quality leads — only keep score >= MIN_PERMIT_SCORE (default 7).
+      if (boostedScore < minScore) {
+        skippedLowScore += 1;
+        continue;
+      }
       const alreadyVendor = p1.contractor_name ? await vendorNameExistsLoose(p1.contractor_name) : false;
       const notes = [
         p1.notes,
@@ -230,6 +240,8 @@ export async function runPermitAgent() {
       added,
       addedRows,
       contacted,
+      skippedLowScore,
+      minScore,
     });
     const runRow = await insertPermitAgentRun({
       run_date: new Date().toISOString().slice(0, 10),
@@ -249,6 +261,8 @@ export async function runPermitAgent() {
       runId: runRow?.id || null,
       permitsFound: permits.length,
       newLeadsAdded: added,
+      skippedLowScore,
+      minScore,
       summary,
       citiesMonitored: CITIES_MONITORED_COUNT,
       scannedBySource,

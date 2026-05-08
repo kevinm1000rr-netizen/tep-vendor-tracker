@@ -323,3 +323,15 @@ export function getEstimateSmsTo() {
 export function getCrmLeadsUrl() {
   return (process.env.CRM_LEADS_URL || 'http://localhost:5173/permits').trim();
 }
+
+/**
+ * Minimum permit lead score (1–10) we keep in the pipeline. Anything below is rejected
+ * by the permit agent on ingest and any existing rows below this threshold are purged at
+ * startup. Override with `PERMIT_LEAD_MIN_SCORE` (e.g. `5` to be more permissive). Default 7.
+ */
+export const DEFAULT_PERMIT_LEAD_MIN_SCORE = 7;
+export function getPermitLeadMinScore() {
+  const raw = Number(process.env.PERMIT_LEAD_MIN_SCORE);
+  if (!Number.isFinite(raw)) return DEFAULT_PERMIT_LEAD_MIN_SCORE;
+  return Math.max(1, Math.min(10, Math.round(raw)));
+}

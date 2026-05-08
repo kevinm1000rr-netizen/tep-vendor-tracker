@@ -3,6 +3,7 @@ import { SEED_VENDORS } from './seed.js';
 import { PG_SCHEMA_DDL } from './pgSchema.js';
 import { migrateSqliteToPostgres } from './migrateSqliteToPostgres.js';
 import { ensureAgentEmailDraftHasContact } from './ai.js';
+import { getPermitLeadMinScore } from './config.js';
 
 const { Pool } = pg;
 
@@ -61,6 +62,16 @@ export async function initDatabase() {
       if (r?.rowCount) console.log(`[db] Removed ${r.rowCount} Water Heater permit_leads row(s) (retired permit type).`);
     })
     .catch(() => {});
+  // Drop any pre-existing rows below the configured minimum score (default 7/10).
+  try {
+    const minScore = getPermitLeadMinScore();
+    const r = await pool.query(`DELETE FROM permit_leads WHERE lead_score < $1`, [minScore]);
+    if (r?.rowCount) {
+      console.log(`[db] Removed ${r.rowCount} permit_leads row(s) with score < ${minScore}/10.`);
+    }
+  } catch (e) {
+    console.warn('[db] purge low-score permit_leads skipped:', e?.message || e);
+  }
   await pool
     .query(`ALTER TABLE vendors ADD COLUMN IF NOT EXISTS responded_at TEXT`)
     .catch(() => {});
